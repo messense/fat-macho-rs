@@ -58,8 +58,22 @@ mod test {
     use super::FatReader;
 
     #[test]
-    fn test_fat_reader() {
-        let buf = fs::read("/Users/lusheng.lls/.pyenv/versions/3.7.5/envs/brm-index/lib/python3.7/site-packages/rjieba/rjieba.abi3.so").unwrap();
+    fn test_fat_reader_dylib() {
+        let buf = fs::read("tests/fixtures/simplefat.dylib").unwrap();
+        let reader = FatReader::new(&buf).unwrap();
+        println!("{:#?}", reader);
+    }
+
+    #[test]
+    fn test_fat_reader_exe() {
+        let buf = fs::read("tests/fixtures/simplefat").unwrap();
+        let reader = FatReader::new(&buf).unwrap();
+        println!("{:#?}", reader);
+    }
+
+    #[test]
+    fn test_fat_reader_ar() {
+        let buf = fs::read("tests/fixtures/simplefat.a").unwrap();
         let reader = FatReader::new(&buf).unwrap();
         println!("{:#?}", reader);
     }
