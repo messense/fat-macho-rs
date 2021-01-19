@@ -1,60 +1,60 @@
 // Ported from https://github.com/randall77/makefat/blob/master/makefat.go
 use std::io::Write;
 
-use object::macho::{FAT_MAGIC, FAT_MAGIC_64, MH_MAGIC, MH_MAGIC_64};
+use goblin::{
+    mach::{fat::FAT_MAGIC, Mach, MachO},
+    Object,
+};
 
 use crate::error::Error;
 
-const ALIGN_BITS: u32 = 12;
-const ALIGN: i64 = 1 << ALIGN_BITS as i64;
+const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
+const ALIGN_BITS: u32 = 14;
 
 #[derive(Debug)]
-struct MachO {
-    data: Vec<u8>,
-    cpu_type: u32,
-    cpu_subtype: u32,
+struct ThinArch<'a> {
+    data: &'a [u8],
+    macho: MachO<'a>,
     offset: i64,
 }
 
 /// Mach-O fat binary writer
 #[derive(Debug)]
-pub struct FatWriter {
-    arches: Vec<MachO>,
+pub struct FatWriter<'a> {
+    arches: Vec<ThinArch<'a>>,
     offset: i64,
 }
 
-impl FatWriter {
+impl<'a> FatWriter<'a> {
     /// Create a new Mach-O fat binary writer
     pub fn new() -> Self {
         Self {
             arches: Vec::new(),
-            offset: ALIGN,
+            offset: 0,
         }
     }
 
-    pub fn add(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
-        let input_len = bytes.len();
-        if input_len < 12 {
-            return Err(Error::InvalidMachO("input too small".to_string()));
+    pub fn add(&mut self, bytes: &'a [u8]) -> Result<(), Error> {
+        match Object::parse(&bytes)? {
+            Object::Mach(mach) => match mach {
+                Mach::Fat(_) => todo!(),
+                Mach::Binary(obj) => {
+                    let align = 1 << ALIGN_BITS as i64;
+                    if self.offset == 0 {
+                        self.offset += align;
+                    }
+                    let thin = ThinArch {
+                        data: bytes,
+                        macho: obj,
+                        offset: self.offset,
+                    };
+                    self.arches.push(thin);
+                    self.offset += bytes.len() as i64;
+                    self.offset = (self.offset + align - 1) / align * align;
+                }
+            },
+            _ => return Err(Error::InvalidMachO("input is not a macho file".to_string())),
         }
-        let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        if magic != MH_MAGIC && magic != MH_MAGIC_64 {
-            return Err(Error::InvalidMachO(format!(
-                "input is not a macho file, magic={:x}",
-                magic
-            )));
-        }
-        let cpu_type = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        let cpu_subtype = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-        let macho = MachO {
-            data: bytes,
-            cpu_type,
-            cpu_subtype,
-            offset: self.offset,
-        };
-        self.arches.push(macho);
-        self.offset += input_len as i64;
-        self.offset = (self.offset + ALIGN - 1) / ALIGN * ALIGN;
         Ok(())
     }
 
@@ -80,8 +80,8 @@ impl FatWriter {
         hdr.push(self.arches.len() as u32);
         // Build a fat_arch for each arch
         for arch in &self.arches {
-            hdr.push(arch.cpu_type);
-            hdr.push(arch.cpu_subtype);
+            hdr.push(arch.macho.header.cputype);
+            hdr.push(arch.macho.header.cpusubtype);
             if is_64_bit {
                 // Big Endian
                 hdr.push((arch.offset >> 32) as u32);
@@ -127,14 +127,17 @@ mod tests {
         use std::fs;
 
         let mut fat = FatWriter::new();
-        fat.add(fs::read("tests/fixtures/thin_x86_64").unwrap())
-            .unwrap();
-        fat.add(fs::read("tests/fixtures/thin_arm64").unwrap())
-            .unwrap();
+        let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
+        let f2 = fs::read("tests/fixtures/thin_arm64").unwrap();
+        fat.add(&f1).unwrap();
+        fat.add(&f2).unwrap();
         let mut out = Vec::new();
         fat.write_to(&mut out).unwrap();
 
         let reader = FatReader::new(&out);
         assert!(reader.is_ok());
+
+        let mut out = fs::File::create("fat2").unwrap();
+        fat.write_to(&mut out).unwrap();
     }
 }

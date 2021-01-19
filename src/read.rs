@@ -1,45 +1,25 @@
-use std::fmt;
-
-use object::read::macho::{FatArch as _, FatArch32, FatArch64, FatHeader};
+use goblin::mach::{fat::FAT_MAGIC, MultiArch};
 
 use crate::error::Error;
 
-#[derive(Debug, Clone, Copy)]
-enum FatArch {
-    FatArch32(FatArch32),
-    FatArch64(FatArch64),
-}
-
 /// Mach-O fat binary reader
-#[derive(Clone)]
+#[derive(Debug)]
 pub struct FatReader<'a> {
-    buffer: &'a [u8],
-    arches: Vec<FatArch>,
-}
-
-impl<'a> fmt::Debug for FatReader<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FatReader")
-            .field("arches", &self.arches)
-            .finish()
-    }
+    fat: MultiArch<'a>,
 }
 
 impl<'a> FatReader<'a> {
     /// Parse a Mach-O FAT binary from a buffer
     pub fn new(buffer: &'a [u8]) -> Result<Self, Error> {
-        if let Ok(arches) = FatHeader::parse_arch32(buffer) {
-            let arches: Vec<FatArch> = arches
-                .iter()
-                .map(|arch| FatArch::FatArch32(arch.clone()))
-                .collect();
-            Ok(Self { buffer, arches })
-        } else if let Ok(arches) = FatHeader::parse_arch64(buffer) {
-            let arches: Vec<FatArch> = arches
-                .iter()
-                .map(|arch| FatArch::FatArch64(arch.clone()))
-                .collect();
-            Ok(Self { buffer, arches })
+        // globin MultiArch::new has bug
+        // MultiArchthread 'read::test::test_fat_reader_not_fat' panicked at 'called `Result::unwrap()` on an `Err` value: Scroll(BadOffset(8))',
+        // goblin-0.3.1/src/mach/mod.rs:413:45
+        let (magic, _) = goblin::mach::parse_magic_and_ctx(buffer, 0)?;
+        if magic != FAT_MAGIC && magic != FAT_MAGIC + 1 {
+            return Err(Error::NotFatBinary);
+        }
+        if let Ok(fat) = MultiArch::new(buffer) {
+            Ok(Self { fat })
         } else {
             Err(Error::NotFatBinary)
         }
@@ -61,22 +41,22 @@ mod test {
     #[test]
     fn test_fat_reader_dylib() {
         let buf = fs::read("tests/fixtures/simplefat.dylib").unwrap();
-        let reader = FatReader::new(&buf).unwrap();
-        println!("{:#?}", reader);
+        let reader = FatReader::new(&buf);
+        assert!(reader.is_ok());
     }
 
     #[test]
     fn test_fat_reader_exe() {
         let buf = fs::read("tests/fixtures/simplefat").unwrap();
-        let reader = FatReader::new(&buf).unwrap();
-        println!("{:#?}", reader);
+        let reader = FatReader::new(&buf);
+        assert!(reader.is_ok());
     }
 
     #[test]
     fn test_fat_reader_ar() {
         let buf = fs::read("tests/fixtures/simplefat.a").unwrap();
-        let reader = FatReader::new(&buf).unwrap();
-        println!("{:#?}", reader);
+        let reader = FatReader::new(&buf);
+        assert!(reader.is_ok());
     }
 
     #[test]
