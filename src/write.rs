@@ -2,20 +2,28 @@
 use std::io::Write;
 
 use goblin::{
-    mach::{fat::FAT_MAGIC, Mach, MachO},
+    mach::{
+        constants::cputype::{
+            CpuType, CPU_TYPE_ARM, CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386,
+            CPU_TYPE_I860, CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC,
+            CPU_TYPE_POWERPC64, CPU_TYPE_SPARC, CPU_TYPE_X86_64,
+        },
+        fat::FAT_MAGIC,
+        Mach, MachO,
+    },
     Object,
 };
 
 use crate::error::Error;
 
 const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
-const ALIGN_BITS: u32 = 14;
 
 #[derive(Debug)]
 struct ThinArch<'a> {
     data: &'a [u8],
     macho: MachO<'a>,
     offset: i64,
+    align: i64,
 }
 
 /// Mach-O fat binary writer
@@ -39,7 +47,8 @@ impl<'a> FatWriter<'a> {
             Object::Mach(mach) => match mach {
                 Mach::Fat(_) => todo!(),
                 Mach::Binary(obj) => {
-                    let align = 1 << ALIGN_BITS as i64;
+                    let cpu = obj.header.cputype;
+                    let align = get_align_from_cpu_type(cpu);
                     if self.offset == 0 {
                         self.offset += align;
                     }
@@ -47,6 +56,7 @@ impl<'a> FatWriter<'a> {
                         data: bytes,
                         macho: obj,
                         offset: self.offset,
+                        align,
                     };
                     self.arches.push(thin);
                     self.offset += bytes.len() as i64;
@@ -91,7 +101,7 @@ impl<'a> FatWriter<'a> {
                 hdr.push((arch.data.len() >> 32) as u32);
             }
             hdr.push(arch.data.len() as u32);
-            hdr.push(ALIGN_BITS);
+            hdr.push(arch.align as u32);
             if is_64_bit {
                 // Reserved
                 hdr.push(0);
@@ -114,6 +124,19 @@ impl<'a> FatWriter<'a> {
             offset += arch.data.len() as i64;
         }
         Ok(())
+    }
+}
+
+fn get_align_from_cpu_type(cpu: CpuType) -> i64 {
+    match cpu {
+        // embedded
+        CPU_TYPE_ARM | CPU_TYPE_ARM64 | CPU_TYPE_ARM64_32 => 0x4000,
+        // desktop
+        CPU_TYPE_X86_64 | CPU_TYPE_I386 | CPU_TYPE_POWERPC | CPU_TYPE_POWERPC64 => 0x1000,
+        CPU_TYPE_MC680X0 | CPU_TYPE_MC88000 | CPU_TYPE_SPARC | CPU_TYPE_I860 | CPU_TYPE_HPPA => {
+            0x2000
+        }
+        _ => 0,
     }
 }
 
