@@ -10,7 +10,7 @@ enum FatArch {
     FatArch64(FatArch64),
 }
 
-/// Mach-O FAT binary reader
+/// Mach-O fat binary reader
 #[derive(Clone)]
 pub struct FatReader<'a> {
     buffer: &'a [u8],
@@ -56,6 +56,7 @@ mod test {
     use std::fs;
 
     use super::FatReader;
+    use crate::error::Error;
 
     #[test]
     fn test_fat_reader_dylib() {
@@ -76,5 +77,18 @@ mod test {
         let buf = fs::read("tests/fixtures/simplefat.a").unwrap();
         let reader = FatReader::new(&buf).unwrap();
         println!("{:#?}", reader);
+    }
+
+    #[test]
+    fn test_fat_reader_not_fat() {
+        let buf = fs::read("tests/fixtures/thin_x86_64").unwrap();
+        let reader = FatReader::new(&buf);
+        assert!(reader.is_err());
+        assert!(matches!(reader.unwrap_err(), Error::NotFatBinary));
+
+        let buf = fs::read("tests/fixtures/thin_arm64").unwrap();
+        let reader = FatReader::new(&buf);
+        assert!(reader.is_err());
+        assert!(matches!(reader.unwrap_err(), Error::NotFatBinary));
     }
 }
