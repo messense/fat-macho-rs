@@ -159,12 +159,12 @@ impl<'a> FatWriter<'a> {
     /// Write Mach-O fat binary to a file
     pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
         let file = File::create(path)?;
-        let mut perm = file.metadata()?.permissions();
         #[cfg(unix)]
         {
+            let mut perm = file.metadata()?.permissions();
             perm.set_mode(0o755);
+            file.set_permissions(perm)?;
         }
-        file.set_permissions(perm)?;
         let mut writer = BufWriter::new(file);
         self.write_to(&mut writer)?;
         Ok(())
