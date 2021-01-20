@@ -18,6 +18,11 @@ impl<'a> FatReader<'a> {
         }
     }
 
+    /// Number of architectures
+    pub fn narches(&self) -> usize {
+        self.fat.narches
+    }
+
     /// Extract thin binary by arch name
     pub fn extract(&self, arch_name: &str) -> Option<&'a [u8]> {
         if let Some((cpu_type, _cpu_subtype)) = get_arch_from_flag(arch_name) {
@@ -50,8 +55,12 @@ mod test {
     #[test]
     fn test_fat_reader_exe() {
         let buf = fs::read("tests/fixtures/simplefat").unwrap();
-        let reader = FatReader::new(&buf);
-        assert!(reader.is_ok());
+        let reader = FatReader::new(&buf).unwrap();
+        assert_eq!(2, reader.narches());
+
+        let buf = fs::read("tests/fixtures/hellofat").unwrap();
+        let reader = FatReader::new(&buf).unwrap();
+        assert_eq!(3, reader.narches());
     }
 
     #[test]
