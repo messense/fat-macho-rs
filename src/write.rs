@@ -1,9 +1,15 @@
 // Ported from https://github.com/randall77/makefat/blob/master/makefat.go
-use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+    path::Path,
+};
 
 use goblin::{
     mach::{
-        constants::cputype::{
+        cputype::{
             get_arch_from_flag, get_arch_name_from_types, CpuSubType, CpuType, CPU_TYPE_ARM,
             CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386, CPU_TYPE_I860,
             CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC, CPU_TYPE_POWERPC64,
@@ -43,6 +49,7 @@ impl<'a> FatWriter<'a> {
         }
     }
 
+    /// Add a new thin Mach-O binary
     pub fn add(&mut self, bytes: &'a [u8]) -> Result<(), Error> {
         match Object::parse(&bytes)? {
             Object::Mach(mach) => match mach {
@@ -80,6 +87,7 @@ impl<'a> FatWriter<'a> {
         Ok(())
     }
 
+    /// Write Mach-O fat binary into the writer
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
         if self.arches.is_empty() {
             return Ok(());
@@ -147,6 +155,20 @@ impl<'a> FatWriter<'a> {
         }
         Ok(())
     }
+
+    /// Write Mach-O fat binary to a file
+    pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
+        let file = File::create(path)?;
+        let mut perm = file.metadata()?.permissions();
+        #[cfg(unix)]
+        {
+            perm.set_mode(0o755);
+        }
+        file.set_permissions(perm)?;
+        let mut writer = BufWriter::new(file);
+        self.write_to(&mut writer)?;
+        Ok(())
+    }
 }
 
 fn get_align_from_cpu_types(cpu_type: CpuType, cpu_subtype: CpuSubType) -> i64 {
@@ -187,5 +209,7 @@ mod tests {
 
         let reader = FatReader::new(&out);
         assert!(reader.is_ok());
+
+        fat.write_to_file("tests/output/fat").unwrap();
     }
 }
