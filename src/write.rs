@@ -187,8 +187,5 @@ mod tests {
 
         let reader = FatReader::new(&out);
         assert!(reader.is_ok());
-
-        let mut out = fs::File::create("fat2").unwrap();
-        fat.write_to(&mut out).unwrap();
     }
 }
