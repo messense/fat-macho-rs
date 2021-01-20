@@ -4,9 +4,10 @@ use std::io::Write;
 use goblin::{
     mach::{
         constants::cputype::{
-            CpuType, CPU_TYPE_ARM, CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386,
-            CPU_TYPE_I860, CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC,
-            CPU_TYPE_POWERPC64, CPU_TYPE_SPARC, CPU_TYPE_X86_64,
+            get_arch_from_flag, get_arch_name_from_types, CpuSubType, CpuType, CPU_TYPE_ARM,
+            CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386, CPU_TYPE_I860,
+            CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC, CPU_TYPE_POWERPC64,
+            CPU_TYPE_SPARC, CPU_TYPE_X86_64,
         },
         fat::FAT_MAGIC,
         Mach, MachO,
@@ -15,6 +16,7 @@ use goblin::{
 };
 
 use crate::error::Error;
+use std::cmp::Ordering;
 
 const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
 
@@ -22,7 +24,6 @@ const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
 struct ThinArch<'a> {
     data: &'a [u8],
     macho: MachO<'a>,
-    offset: i64,
     align: i64,
 }
 
@@ -30,7 +31,7 @@ struct ThinArch<'a> {
 #[derive(Debug)]
 pub struct FatWriter<'a> {
     arches: Vec<ThinArch<'a>>,
-    offset: i64,
+    max_align: i64,
 }
 
 impl<'a> FatWriter<'a> {
@@ -38,7 +39,7 @@ impl<'a> FatWriter<'a> {
     pub fn new() -> Self {
         Self {
             arches: Vec::new(),
-            offset: 0,
+            max_align: 0,
         }
     }
 
@@ -47,24 +48,35 @@ impl<'a> FatWriter<'a> {
             Object::Mach(mach) => match mach {
                 Mach::Fat(_) => todo!(),
                 Mach::Binary(obj) => {
-                    let cpu = obj.header.cputype;
-                    let align = get_align_from_cpu_type(cpu);
-                    if self.offset == 0 {
-                        self.offset += align;
+                    let align = get_align_from_cpu_types(obj.header.cputype, obj.header.cpusubtype);
+                    if align > self.max_align {
+                        self.max_align = align;
                     }
                     let thin = ThinArch {
                         data: bytes,
                         macho: obj,
-                        offset: self.offset,
                         align,
                     };
                     self.arches.push(thin);
-                    self.offset += bytes.len() as i64;
-                    self.offset = (self.offset + align - 1) / align * align;
                 }
             },
             _ => return Err(Error::InvalidMachO("input is not a macho file".to_string())),
         }
+        // Sort the files by alignment to save space in ouput
+        self.arches.sort_by(|a, b| {
+            if a.macho.header.cputype == b.macho.header.cputype {
+                // if cpu types match, sort by cpu subtype
+                return a.macho.header.cpusubtype.cmp(&b.macho.header.cpusubtype);
+            }
+            // force arm64-family to follow after all other slices
+            if a.macho.header.cputype == CPU_TYPE_ARM64 {
+                return Ordering::Greater;
+            }
+            if b.macho.header.cputype == CPU_TYPE_ARM64 {
+                return Ordering::Less;
+            }
+            a.align.cmp(&b.align)
+        });
         Ok(())
     }
 
@@ -72,8 +84,16 @@ impl<'a> FatWriter<'a> {
         if self.arches.is_empty() {
             return Ok(());
         }
+        let align = self.max_align;
+        let mut total_offset = align;
+        let mut arch_offsets = Vec::with_capacity(self.arches.len());
+        for arch in &self.arches {
+            arch_offsets.push(total_offset);
+            total_offset += arch.data.len() as i64;
+            total_offset = (total_offset + align - 1) / align * align;
+        }
         // Check whether we're doing fat32 or fat64
-        let is_64_bit = if self.offset >= 1i64 << 32
+        let is_fat64 = if total_offset >= 1i64 << 32
             || self.arches.last().unwrap().data.len() as i64 >= 1i64 << 32
         {
             true
@@ -82,27 +102,29 @@ impl<'a> FatWriter<'a> {
         };
         let mut hdr = Vec::with_capacity(12);
         // Build a fat_header
-        if is_64_bit {
+        if is_fat64 {
             hdr.push(FAT_MAGIC_64);
         } else {
             hdr.push(FAT_MAGIC);
         }
         hdr.push(self.arches.len() as u32);
+        // Compute the max alignment bits
+        let align_bits = (align as f32).log2() as u32;
         // Build a fat_arch for each arch
-        for arch in &self.arches {
+        for (arch, arch_offset) in self.arches.iter().zip(arch_offsets.iter()) {
             hdr.push(arch.macho.header.cputype);
             hdr.push(arch.macho.header.cpusubtype);
-            if is_64_bit {
+            if is_fat64 {
                 // Big Endian
-                hdr.push((arch.offset >> 32) as u32);
+                hdr.push((arch_offset >> 32) as u32);
             }
-            hdr.push(arch.offset as u32);
-            if is_64_bit {
+            hdr.push(*arch_offset as u32);
+            if is_fat64 {
                 hdr.push((arch.data.len() >> 32) as u32);
             }
             hdr.push(arch.data.len() as u32);
-            hdr.push(arch.align as u32);
-            if is_64_bit {
+            hdr.push(align_bits);
+            if is_fat64 {
                 // Reserved
                 hdr.push(0);
             }
@@ -115,10 +137,10 @@ impl<'a> FatWriter<'a> {
         }
         let mut offset = 4 * hdr.len() as i64;
         // Write each arch
-        for arch in &self.arches {
-            if offset < arch.offset {
-                writer.write_all(&vec![0; (arch.offset - offset) as usize])?;
-                offset = arch.offset;
+        for (arch, arch_offset) in self.arches.iter().zip(arch_offsets) {
+            if offset < arch_offset {
+                writer.write_all(&vec![0; (arch_offset - offset) as usize])?;
+                offset = arch_offset;
             }
             writer.write_all(&arch.data)?;
             offset += arch.data.len() as i64;
@@ -127,17 +149,23 @@ impl<'a> FatWriter<'a> {
     }
 }
 
-fn get_align_from_cpu_type(cpu: CpuType) -> i64 {
-    match cpu {
-        // embedded
-        CPU_TYPE_ARM | CPU_TYPE_ARM64 | CPU_TYPE_ARM64_32 => 0x4000,
-        // desktop
-        CPU_TYPE_X86_64 | CPU_TYPE_I386 | CPU_TYPE_POWERPC | CPU_TYPE_POWERPC64 => 0x1000,
-        CPU_TYPE_MC680X0 | CPU_TYPE_MC88000 | CPU_TYPE_SPARC | CPU_TYPE_I860 | CPU_TYPE_HPPA => {
-            0x2000
+fn get_align_from_cpu_types(cpu_type: CpuType, cpu_subtype: CpuSubType) -> i64 {
+    if let Some(arch_name) = get_arch_name_from_types(cpu_type, cpu_subtype) {
+        if let Some((cpu_type, _)) = get_arch_from_flag(arch_name) {
+            match cpu_type {
+                // embedded
+                CPU_TYPE_ARM | CPU_TYPE_ARM64 | CPU_TYPE_ARM64_32 => return 0x4000,
+                // desktop
+                CPU_TYPE_X86_64 | CPU_TYPE_I386 | CPU_TYPE_POWERPC | CPU_TYPE_POWERPC64 => {
+                    return 0x1000
+                }
+                CPU_TYPE_MC680X0 | CPU_TYPE_MC88000 | CPU_TYPE_SPARC | CPU_TYPE_I860
+                | CPU_TYPE_HPPA => return 0x2000,
+                _ => {}
+            }
         }
-        _ => 0,
     }
+    0
 }
 
 #[cfg(test)]
