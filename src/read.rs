@@ -1,4 +1,4 @@
-use goblin::mach::{cputype::get_arch_from_flag, fat::FAT_MAGIC, MultiArch};
+use goblin::mach::{cputype::get_arch_from_flag, Mach, MultiArch};
 
 use crate::error::Error;
 
@@ -12,17 +12,9 @@ pub struct FatReader<'a> {
 impl<'a> FatReader<'a> {
     /// Parse a Mach-O FAT binary from a buffer
     pub fn new(buffer: &'a [u8]) -> Result<Self, Error> {
-        // globin MultiArch::new has bug
-        // MultiArchthread 'read::test::test_fat_reader_not_fat' panicked at 'called `Result::unwrap()` on an `Err` value: Scroll(BadOffset(8))',
-        // goblin-0.3.1/src/mach/mod.rs:413:45
-        let (magic, _) = goblin::mach::parse_magic_and_ctx(buffer, 0)?;
-        if magic != FAT_MAGIC && magic != FAT_MAGIC + 1 {
-            return Err(Error::NotFatBinary);
-        }
-        if let Ok(fat) = MultiArch::new(buffer) {
-            Ok(Self { buffer, fat })
-        } else {
-            Err(Error::NotFatBinary)
+        match Mach::parse(buffer)? {
+            Mach::Fat(fat) => Ok(Self { buffer, fat }),
+            Mach::Binary(_) => Err(Error::NotFatBinary),
         }
     }
 
