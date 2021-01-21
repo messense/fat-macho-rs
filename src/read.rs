@@ -18,11 +18,6 @@ impl<'a> FatReader<'a> {
         }
     }
 
-    /// Number of architectures
-    pub fn narches(&self) -> usize {
-        self.fat.narches
-    }
-
     /// Extract thin binary by arch name
     pub fn extract(&self, arch_name: &str) -> Option<&'a [u8]> {
         if let Some((cpu_type, _cpu_subtype)) = get_arch_from_flag(arch_name) {
@@ -33,6 +28,20 @@ impl<'a> FatReader<'a> {
                 .map(|arch| arch.slice(self.buffer));
         }
         None
+    }
+}
+
+impl<'a> std::ops::Deref for FatReader<'a> {
+    type Target = MultiArch<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fat
+    }
+}
+
+impl<'a> std::ops::DerefMut for FatReader<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.fat
     }
 }
 
@@ -56,11 +65,11 @@ mod test {
     fn test_fat_reader_exe() {
         let buf = fs::read("tests/fixtures/simplefat").unwrap();
         let reader = FatReader::new(&buf).unwrap();
-        assert_eq!(2, reader.narches());
+        assert_eq!(2, reader.narches);
 
         let buf = fs::read("tests/fixtures/hellofat").unwrap();
         let reader = FatReader::new(&buf).unwrap();
-        assert_eq!(3, reader.narches());
+        assert_eq!(3, reader.narches);
     }
 
     #[test]
