@@ -53,7 +53,12 @@ impl<'a> FatWriter<'a> {
     pub fn add(&mut self, bytes: &'a [u8]) -> Result<(), Error> {
         match Object::parse(&bytes)? {
             Object::Mach(mach) => match mach {
-                Mach::Fat(_) => todo!(),
+                Mach::Fat(fat) => {
+                    for arch in fat.arches()? {
+                        let buffer = arch.slice(bytes);
+                        self.add(buffer)?;
+                    }
+                }
                 Mach::Binary(obj) => {
                     let align = get_align_from_cpu_types(obj.header.cputype, obj.header.cpusubtype);
                     if align > self.max_align {
@@ -238,6 +243,15 @@ mod tests {
         assert!(reader.is_ok());
 
         fat.write_to_file("tests/output/fat").unwrap();
+    }
+
+    #[test]
+    fn test_fat_writer_add_fat() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/simplefat").unwrap();
+        fat.add(&f1).unwrap();
+        assert!(fat.exists("x86_64"));
+        assert!(fat.exists("arm64"));
     }
 
     #[test]
