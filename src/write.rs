@@ -87,6 +87,33 @@ impl<'a> FatWriter<'a> {
         Ok(())
     }
 
+    /// Remove an architecture
+    pub fn remove(&mut self, arch: &str) -> Option<&'a [u8]> {
+        if let Some((cpu_type, cpu_subtype)) = get_arch_from_flag(arch) {
+            if let Some(index) = self.arches.iter().position(|arch| {
+                arch.macho.header.cputype == cpu_type && arch.macho.header.cpusubtype == cpu_subtype
+            }) {
+                return Some(self.arches.remove(index).data);
+            }
+        }
+        None
+    }
+
+    /// Check whether a certain architecture exists in this fat binary
+    pub fn exists(&self, arch: &str) -> bool {
+        if let Some((cpu_type, cpu_subtype)) = get_arch_from_flag(arch) {
+            return self
+                .arches
+                .iter()
+                .find(|arch| {
+                    arch.macho.header.cputype == cpu_type
+                        && arch.macho.header.cpusubtype == cpu_subtype
+                })
+                .is_some();
+        }
+        false
+    }
+
     /// Write Mach-O fat binary into the writer
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
         if self.arches.is_empty() {
@@ -192,13 +219,13 @@ fn get_align_from_cpu_types(cpu_type: CpuType, cpu_subtype: CpuSubType) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::FatWriter;
     use crate::read::FatReader;
 
     #[test]
     fn test_fat_writer_exe() {
-        use std::fs;
-
         let mut fat = FatWriter::new();
         let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
         let f2 = fs::read("tests/fixtures/thin_arm64").unwrap();
@@ -211,5 +238,18 @@ mod tests {
         assert!(reader.is_ok());
 
         fat.write_to_file("tests/output/fat").unwrap();
+    }
+
+    #[test]
+    fn test_fat_writer_remove() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
+        let f2 = fs::read("tests/fixtures/thin_arm64").unwrap();
+        fat.add(&f1).unwrap();
+        fat.add(&f2).unwrap();
+        let arm64 = fat.remove("arm64");
+        assert!(arm64.is_some());
+        assert!(fat.exists("x86_64"));
+        assert!(!fat.exists("arm64"));
     }
 }
