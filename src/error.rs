@@ -6,6 +6,7 @@ pub enum Error {
     Goblin(goblin::error::Error),
     NotFatBinary,
     InvalidMachO(String),
+    DuplicatedArch(String),
 }
 
 impl fmt::Display for Error {
@@ -15,6 +16,7 @@ impl fmt::Display for Error {
             Error::Goblin(err) => err.fmt(f),
             Error::NotFatBinary => write!(f, "input is not a valid Mach-O fat binary"),
             Error::InvalidMachO(err) => write!(f, "{}", err),
+            Error::DuplicatedArch(arch) => write!(f, "duplicated architecture {}", arch),
         }
     }
 }
@@ -26,6 +28,7 @@ impl error::Error for Error {
             Error::Goblin(err) => Some(err),
             Error::NotFatBinary => None,
             Error::InvalidMachO(_) => None,
+            Error::DuplicatedArch(_) => None,
         }
     }
 }

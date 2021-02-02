@@ -60,7 +60,23 @@ impl<'a> FatWriter<'a> {
                     }
                 }
                 Mach::Binary(obj) => {
-                    let align = get_align_from_cpu_types(obj.header.cputype, obj.header.cpusubtype);
+                    let cpu_type = obj.header.cputype;
+                    let cpu_subtype = obj.header.cpusubtype;
+                    // Check if this architecture already exists
+                    if self
+                        .arches
+                        .iter()
+                        .find(|arch| {
+                            arch.macho.header.cputype == cpu_type
+                                && arch.macho.header.cpusubtype == cpu_subtype
+                        })
+                        .is_some()
+                    {
+                        let arch =
+                            get_arch_name_from_types(cpu_type, cpu_subtype).unwrap_or("unknown");
+                        return Err(Error::DuplicatedArch(arch.to_string()));
+                    }
+                    let align = get_align_from_cpu_types(cpu_type, cpu_subtype);
                     if align > self.max_align {
                         self.max_align = align;
                     }
@@ -243,6 +259,14 @@ mod tests {
         assert!(reader.is_ok());
 
         fat.write_to_file("tests/output/fat").unwrap();
+    }
+
+    #[test]
+    fn test_fat_writer_add_duplicated_arch() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
+        fat.add(&f1).unwrap();
+        assert!(fat.add(&f1).is_err());
     }
 
     #[test]
