@@ -13,7 +13,7 @@ Add it to your ``Cargo.toml``:
 
 ```toml
 [dependencies]
-fat-macho = "0.1"
+fat-macho = "0.2"
 ```
 
 then you are good to go. If you are using Rust 2015 you have to add ``extern crate fat_macho`` to your crate root as well. 
