@@ -8,12 +8,13 @@ use std::{
 };
 
 use goblin::{
+    archive::Archive,
     mach::{
         cputype::{
-            get_arch_from_flag, get_arch_name_from_types, CpuSubType, CpuType, CPU_TYPE_ARM,
-            CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386, CPU_TYPE_I860,
-            CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC, CPU_TYPE_POWERPC64,
-            CPU_TYPE_SPARC, CPU_TYPE_X86_64,
+            get_arch_from_flag, get_arch_name_from_types, CpuSubType, CpuType, CPU_ARCH_ABI64,
+            CPU_TYPE_ARM, CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386,
+            CPU_TYPE_I860, CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC,
+            CPU_TYPE_POWERPC64, CPU_TYPE_SPARC, CPU_TYPE_X86_64,
         },
         fat::FAT_MAGIC,
         Mach,
@@ -90,7 +91,22 @@ impl FatWriter {
                 }
             },
             Object::Archive(ar) => {
-                println!("{:?}", ar.members());
+                let (cpu_type, cpu_subtype) = self.check_archive(&bytes, &ar)?;
+                let align = if cpu_type & CPU_ARCH_ABI64 != 0 {
+                    8 /* alignof(u64) */
+                } else {
+                    4 /* alignof(u32) */
+                };
+                if align > self.max_align {
+                    self.max_align = align;
+                }
+                let thin = ThinArch {
+                    data: bytes,
+                    cpu_type,
+                    cpu_subtype,
+                    align,
+                };
+                self.arches.push(thin);
             }
             _ => return Err(Error::InvalidMachO("input is not a macho file".to_string())),
         }
@@ -110,6 +126,24 @@ impl FatWriter {
             a.align.cmp(&b.align)
         });
         Ok(())
+    }
+
+    fn check_archive(&self, buffer: &[u8], ar: &Archive) -> Result<(u32, u32), Error> {
+        for member in ar.members() {
+            let bytes = ar.extract(member, buffer)?;
+            match Object::parse(bytes)? {
+                Object::Mach(mach) => match mach {
+                    Mach::Binary(obj) => {
+                        return Ok((obj.header.cputype, obj.header.cpusubtype));
+                    }
+                    Mach::Fat(_) => {}
+                },
+                _ => {}
+            }
+        }
+        Err(Error::InvalidMachO(
+            "No Mach-O objects found in archivec".to_string(),
+        ))
     }
 
     /// Remove an architecture
@@ -279,6 +313,22 @@ mod tests {
         fat.add(f1).unwrap();
         assert!(fat.exists("x86_64"));
         assert!(fat.exists("arm64"));
+    }
+
+    #[test]
+    fn test_fat_writer_add_archive() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/thin_x86_64.a").unwrap();
+        let f2 = fs::read("tests/fixtures/thin_arm64.a").unwrap();
+        fat.add(f1).unwrap();
+        fat.add(f2).unwrap();
+        let mut out = Vec::new();
+        fat.write_to(&mut out).unwrap();
+
+        let reader = FatReader::new(&out);
+        assert!(reader.is_ok());
+
+        fat.write_to_file("tests/output/fat.a").unwrap();
     }
 
     #[test]
