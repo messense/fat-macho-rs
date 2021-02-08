@@ -16,7 +16,6 @@ use goblin::{
             CPU_TYPE_SPARC, CPU_TYPE_X86_64,
         },
         fat::FAT_MAGIC,
-        header::Header,
         Mach,
     },
     Object,
@@ -30,7 +29,8 @@ const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
 #[derive(Debug)]
 struct ThinArch {
     data: Vec<u8>,
-    header: Header,
+    cpu_type: u32,
+    cpu_subtype: u32,
     align: i64,
 }
 
@@ -69,9 +69,7 @@ impl FatWriter {
                     if self
                         .arches
                         .iter()
-                        .find(|arch| {
-                            arch.header.cputype == cpu_type && arch.header.cpusubtype == cpu_subtype
-                        })
+                        .find(|arch| arch.cpu_type == cpu_type && arch.cpu_subtype == cpu_subtype)
                         .is_some()
                     {
                         let arch =
@@ -84,25 +82,29 @@ impl FatWriter {
                     }
                     let thin = ThinArch {
                         data: bytes,
-                        header: header,
+                        cpu_type,
+                        cpu_subtype,
                         align,
                     };
                     self.arches.push(thin);
                 }
             },
+            Object::Archive(ar) => {
+                println!("{:?}", ar.members());
+            }
             _ => return Err(Error::InvalidMachO("input is not a macho file".to_string())),
         }
         // Sort the files by alignment to save space in ouput
         self.arches.sort_by(|a, b| {
-            if a.header.cputype == b.header.cputype {
+            if a.cpu_type == b.cpu_type {
                 // if cpu types match, sort by cpu subtype
-                return a.header.cpusubtype.cmp(&b.header.cpusubtype);
+                return a.cpu_subtype.cmp(&b.cpu_subtype);
             }
             // force arm64-family to follow after all other slices
-            if a.header.cputype == CPU_TYPE_ARM64 {
+            if a.cpu_type == CPU_TYPE_ARM64 {
                 return Ordering::Greater;
             }
-            if b.header.cputype == CPU_TYPE_ARM64 {
+            if b.cpu_type == CPU_TYPE_ARM64 {
                 return Ordering::Less;
             }
             a.align.cmp(&b.align)
@@ -113,9 +115,11 @@ impl FatWriter {
     /// Remove an architecture
     pub fn remove(&mut self, arch: &str) -> Option<Vec<u8>> {
         if let Some((cpu_type, cpu_subtype)) = get_arch_from_flag(arch) {
-            if let Some(index) = self.arches.iter().position(|arch| {
-                arch.header.cputype == cpu_type && arch.header.cpusubtype == cpu_subtype
-            }) {
+            if let Some(index) = self
+                .arches
+                .iter()
+                .position(|arch| arch.cpu_type == cpu_type && arch.cpu_subtype == cpu_subtype)
+            {
                 return Some(self.arches.remove(index).data);
             }
         }
@@ -128,9 +132,7 @@ impl FatWriter {
             return self
                 .arches
                 .iter()
-                .find(|arch| {
-                    arch.header.cputype == cpu_type && arch.header.cpusubtype == cpu_subtype
-                })
+                .find(|arch| arch.cpu_type == cpu_type && arch.cpu_subtype == cpu_subtype)
                 .is_some();
         }
         false
@@ -169,8 +171,8 @@ impl FatWriter {
         let align_bits = (align as f32).log2() as u32;
         // Build a fat_arch for each arch
         for (arch, arch_offset) in self.arches.iter().zip(arch_offsets.iter()) {
-            hdr.push(arch.header.cputype);
-            hdr.push(arch.header.cpusubtype);
+            hdr.push(arch.cpu_type);
+            hdr.push(arch.cpu_subtype);
             if is_fat64 {
                 // Big Endian
                 hdr.push((arch_offset >> 32) as u32);
