@@ -16,7 +16,8 @@ use goblin::{
             CPU_TYPE_SPARC, CPU_TYPE_X86_64,
         },
         fat::FAT_MAGIC,
-        Mach, MachO,
+        header::Header,
+        Mach,
     },
     Object,
 };
@@ -27,20 +28,20 @@ use std::cmp::Ordering;
 const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
 
 #[derive(Debug)]
-struct ThinArch<'a> {
-    data: &'a [u8],
-    macho: MachO<'a>,
+struct ThinArch {
+    data: Vec<u8>,
+    header: Header,
     align: i64,
 }
 
 /// Mach-O fat binary writer
 #[derive(Debug)]
-pub struct FatWriter<'a> {
-    arches: Vec<ThinArch<'a>>,
+pub struct FatWriter {
+    arches: Vec<ThinArch>,
     max_align: i64,
 }
 
-impl<'a> FatWriter<'a> {
+impl FatWriter {
     /// Create a new Mach-O fat binary writer
     pub fn new() -> Self {
         Self {
@@ -50,25 +51,25 @@ impl<'a> FatWriter<'a> {
     }
 
     /// Add a new thin Mach-O binary
-    pub fn add(&mut self, bytes: &'a [u8]) -> Result<(), Error> {
+    pub fn add(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
         match Object::parse(&bytes)? {
             Object::Mach(mach) => match mach {
                 Mach::Fat(fat) => {
                     for arch in fat.arches()? {
-                        let buffer = arch.slice(bytes);
-                        self.add(buffer)?;
+                        let buffer = arch.slice(&bytes);
+                        self.add(buffer.to_vec())?;
                     }
                 }
                 Mach::Binary(obj) => {
-                    let cpu_type = obj.header.cputype;
-                    let cpu_subtype = obj.header.cpusubtype;
+                    let header = obj.header;
+                    let cpu_type = header.cputype;
+                    let cpu_subtype = header.cpusubtype;
                     // Check if this architecture already exists
                     if self
                         .arches
                         .iter()
                         .find(|arch| {
-                            arch.macho.header.cputype == cpu_type
-                                && arch.macho.header.cpusubtype == cpu_subtype
+                            arch.header.cputype == cpu_type && arch.header.cpusubtype == cpu_subtype
                         })
                         .is_some()
                     {
@@ -82,7 +83,7 @@ impl<'a> FatWriter<'a> {
                     }
                     let thin = ThinArch {
                         data: bytes,
-                        macho: obj,
+                        header: header,
                         align,
                     };
                     self.arches.push(thin);
@@ -92,15 +93,15 @@ impl<'a> FatWriter<'a> {
         }
         // Sort the files by alignment to save space in ouput
         self.arches.sort_by(|a, b| {
-            if a.macho.header.cputype == b.macho.header.cputype {
+            if a.header.cputype == b.header.cputype {
                 // if cpu types match, sort by cpu subtype
-                return a.macho.header.cpusubtype.cmp(&b.macho.header.cpusubtype);
+                return a.header.cpusubtype.cmp(&b.header.cpusubtype);
             }
             // force arm64-family to follow after all other slices
-            if a.macho.header.cputype == CPU_TYPE_ARM64 {
+            if a.header.cputype == CPU_TYPE_ARM64 {
                 return Ordering::Greater;
             }
-            if b.macho.header.cputype == CPU_TYPE_ARM64 {
+            if b.header.cputype == CPU_TYPE_ARM64 {
                 return Ordering::Less;
             }
             a.align.cmp(&b.align)
@@ -109,10 +110,10 @@ impl<'a> FatWriter<'a> {
     }
 
     /// Remove an architecture
-    pub fn remove(&mut self, arch: &str) -> Option<&'a [u8]> {
+    pub fn remove(&mut self, arch: &str) -> Option<Vec<u8>> {
         if let Some((cpu_type, cpu_subtype)) = get_arch_from_flag(arch) {
             if let Some(index) = self.arches.iter().position(|arch| {
-                arch.macho.header.cputype == cpu_type && arch.macho.header.cpusubtype == cpu_subtype
+                arch.header.cputype == cpu_type && arch.header.cpusubtype == cpu_subtype
             }) {
                 return Some(self.arches.remove(index).data);
             }
@@ -127,8 +128,7 @@ impl<'a> FatWriter<'a> {
                 .arches
                 .iter()
                 .find(|arch| {
-                    arch.macho.header.cputype == cpu_type
-                        && arch.macho.header.cpusubtype == cpu_subtype
+                    arch.header.cputype == cpu_type && arch.header.cpusubtype == cpu_subtype
                 })
                 .is_some();
         }
@@ -168,8 +168,8 @@ impl<'a> FatWriter<'a> {
         let align_bits = (align as f32).log2() as u32;
         // Build a fat_arch for each arch
         for (arch, arch_offset) in self.arches.iter().zip(arch_offsets.iter()) {
-            hdr.push(arch.macho.header.cputype);
-            hdr.push(arch.macho.header.cpusubtype);
+            hdr.push(arch.header.cputype);
+            hdr.push(arch.header.cpusubtype);
             if is_fat64 {
                 // Big Endian
                 hdr.push((arch_offset >> 32) as u32);
@@ -250,8 +250,8 @@ mod tests {
         let mut fat = FatWriter::new();
         let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
         let f2 = fs::read("tests/fixtures/thin_arm64").unwrap();
-        fat.add(&f1).unwrap();
-        fat.add(&f2).unwrap();
+        fat.add(f1).unwrap();
+        fat.add(f2).unwrap();
         let mut out = Vec::new();
         fat.write_to(&mut out).unwrap();
 
@@ -265,15 +265,15 @@ mod tests {
     fn test_fat_writer_add_duplicated_arch() {
         let mut fat = FatWriter::new();
         let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
-        fat.add(&f1).unwrap();
-        assert!(fat.add(&f1).is_err());
+        fat.add(f1.clone()).unwrap();
+        assert!(fat.add(f1).is_err());
     }
 
     #[test]
     fn test_fat_writer_add_fat() {
         let mut fat = FatWriter::new();
         let f1 = fs::read("tests/fixtures/simplefat").unwrap();
-        fat.add(&f1).unwrap();
+        fat.add(f1).unwrap();
         assert!(fat.exists("x86_64"));
         assert!(fat.exists("arm64"));
     }
@@ -283,8 +283,8 @@ mod tests {
         let mut fat = FatWriter::new();
         let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
         let f2 = fs::read("tests/fixtures/thin_arm64").unwrap();
-        fat.add(&f1).unwrap();
-        fat.add(&f2).unwrap();
+        fat.add(f1).unwrap();
+        fat.add(f2).unwrap();
         let arm64 = fat.remove("arm64");
         assert!(arm64.is_some());
         assert!(fat.exists("x86_64"));
