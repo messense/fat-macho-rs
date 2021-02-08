@@ -51,7 +51,8 @@ impl FatWriter {
     }
 
     /// Add a new thin Mach-O binary
-    pub fn add(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
+    pub fn add<T: Into<Vec<u8>>>(&mut self, bytes: T) -> Result<(), Error> {
+        let bytes = bytes.into();
         match Object::parse(&bytes)? {
             Object::Mach(mach) => match mach {
                 Mach::Fat(fat) => {
