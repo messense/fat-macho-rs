@@ -16,7 +16,7 @@ use goblin::{
             CPU_TYPE_I860, CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC,
             CPU_TYPE_POWERPC64, CPU_TYPE_SPARC, CPU_TYPE_X86_64,
         },
-        fat::{FatHeader, FAT_MAGIC, SIZEOF_FAT_ARCH},
+        fat::{FAT_MAGIC, SIZEOF_FAT_ARCH, SIZEOF_FAT_HEADER},
         Mach,
     },
     Object,
@@ -191,7 +191,7 @@ impl FatWriter {
                 false
             };
         let align = self.max_align;
-        let mut total_offset = std::mem::size_of::<FatHeader>() as i64;
+        let mut total_offset = SIZEOF_FAT_HEADER as i64;
         if is_fat64 {
             total_offset += self.arches.len() as i64 * SIZEOF_FAT_ARCH_64 as i64;
         // narches * size of fat_arch_64
