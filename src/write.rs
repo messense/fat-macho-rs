@@ -3,7 +3,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::{
     fs::File,
-    io::{BufWriter, Write},
+    io::{self, BufWriter, Write},
     path::Path,
 };
 
@@ -28,6 +28,8 @@ use std::cmp::Ordering;
 const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
 const SIZEOF_FAT_ARCH_64: usize = 32;
 
+const LLVM_BITCODE_WRAPPER_MAGIC: u32 = 0x0B17C0DE;
+
 #[derive(Debug)]
 struct ThinArch {
     data: Vec<u8>,
@@ -42,6 +44,17 @@ pub struct FatWriter {
     arches: Vec<ThinArch>,
     max_align: i64,
     is_fat64: bool,
+}
+
+#[inline]
+fn unpack_u32(buf: &[u8]) -> io::Result<u32> {
+    if buf.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "not enough data for unpacking u32",
+        ));
+    }
+    Ok(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]))
 }
 
 impl FatWriter {
@@ -113,6 +126,13 @@ impl FatWriter {
                     align,
                 };
                 self.arches.push(thin);
+            }
+            Object::Unknown(_) => {
+                let magic = unpack_u32(&bytes)?;
+                if magic == LLVM_BITCODE_WRAPPER_MAGIC {
+                    let cpu_type = unpack_u32(&bytes[16..])?;
+                }
+                return Err(Error::InvalidMachO("input is not a macho file".to_string()));
             }
             _ => return Err(Error::InvalidMachO("input is not a macho file".to_string())),
         }
@@ -341,6 +361,22 @@ mod tests {
         assert!(reader.is_ok());
 
         fat.write_to_file("tests/output/fat.a").unwrap();
+    }
+
+    #[test]
+    fn test_fat_writer_add_llvm_bitcode() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/thin_x86_64.bc").unwrap();
+        let f2 = fs::read("tests/fixtures/thin_arm64.bc").unwrap();
+        fat.add(f1).unwrap();
+        fat.add(f2).unwrap();
+        let mut out = Vec::new();
+        fat.write_to(&mut out).unwrap();
+
+        let reader = FatReader::new(&out);
+        assert!(reader.is_ok());
+
+        fat.write_to_file("tests/output/fat_bc").unwrap();
     }
 
     #[test]
