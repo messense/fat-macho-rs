@@ -16,7 +16,7 @@ use goblin::{
             CPU_TYPE_I860, CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC,
             CPU_TYPE_POWERPC64, CPU_TYPE_SPARC, CPU_TYPE_X86_64,
         },
-        fat::FAT_MAGIC,
+        fat::{FatHeader, FAT_MAGIC, SIZEOF_FAT_ARCH},
         Mach,
     },
     Object,
@@ -26,6 +26,7 @@ use crate::error::Error;
 use std::cmp::Ordering;
 
 const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
+const SIZEOF_FAT_ARCH_64: usize = 32;
 
 #[derive(Debug)]
 struct ThinArch {
@@ -40,6 +41,7 @@ struct ThinArch {
 pub struct FatWriter {
     arches: Vec<ThinArch>,
     max_align: i64,
+    is_fat64: bool,
 }
 
 impl FatWriter {
@@ -48,6 +50,7 @@ impl FatWriter {
         Self {
             arches: Vec::new(),
             max_align: 0,
+            is_fat64: false,
         }
     }
 
@@ -76,6 +79,9 @@ impl FatWriter {
                         let arch =
                             get_arch_name_from_types(cpu_type, cpu_subtype).unwrap_or("unknown");
                         return Err(Error::DuplicatedArch(arch.to_string()));
+                    }
+                    if header.magic == FAT_MAGIC_64 {
+                        self.is_fat64 = true;
                     }
                     let align = get_align_from_cpu_types(cpu_type, cpu_subtype);
                     if align > self.max_align {
@@ -177,22 +183,28 @@ impl FatWriter {
         if self.arches.is_empty() {
             return Ok(());
         }
+        // Check whether we're doing fat32 or fat64
+        let is_fat64 =
+            if self.is_fat64 || self.arches.last().unwrap().data.len() as i64 >= 1i64 << 32 {
+                true
+            } else {
+                false
+            };
         let align = self.max_align;
-        let mut total_offset = align;
+        let mut total_offset = std::mem::size_of::<FatHeader>() as i64;
+        if is_fat64 {
+            total_offset += self.arches.len() as i64 * SIZEOF_FAT_ARCH_64 as i64;
+        // narches * size of fat_arch_64
+        } else {
+            total_offset += self.arches.len() as i64 * SIZEOF_FAT_ARCH as i64; // narches * size of fat_arch
+        }
         let mut arch_offsets = Vec::with_capacity(self.arches.len());
         for arch in &self.arches {
+            // Round up to multiple of align
+            total_offset = (total_offset + align - 1) / align * align;
             arch_offsets.push(total_offset);
             total_offset += arch.data.len() as i64;
-            total_offset = (total_offset + align - 1) / align * align;
         }
-        // Check whether we're doing fat32 or fat64
-        let is_fat64 = if total_offset >= 1i64 << 32
-            || self.arches.last().unwrap().data.len() as i64 >= 1i64 << 32
-        {
-            true
-        } else {
-            false
-        };
         let mut hdr = Vec::with_capacity(12);
         // Build a fat_header
         if is_fat64 {
@@ -283,7 +295,7 @@ mod tests {
     use crate::read::FatReader;
 
     #[test]
-    fn test_fat_writer_exe() {
+    fn test_fat_writer_add_exe() {
         let mut fat = FatWriter::new();
         let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
         let f2 = fs::read("tests/fixtures/thin_arm64").unwrap();
