@@ -2,8 +2,9 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
+    cmp::Ordering,
     fs::File,
-    io::{BufWriter, Write},
+    io::{self, BufWriter, Write},
     path::Path,
 };
 
@@ -12,21 +13,28 @@ use goblin::{
     mach::{
         cputype::{
             get_arch_from_flag, get_arch_name_from_types, CpuSubType, CpuType, CPU_ARCH_ABI64,
-            CPU_TYPE_ARM, CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386,
-            CPU_TYPE_I860, CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC,
-            CPU_TYPE_POWERPC64, CPU_TYPE_SPARC, CPU_TYPE_X86_64,
+            CPU_SUBTYPE_ARM64_32_ALL, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64_E,
+            CPU_SUBTYPE_ARM_V4T, CPU_SUBTYPE_ARM_V5TEJ, CPU_SUBTYPE_ARM_V6, CPU_SUBTYPE_ARM_V6M,
+            CPU_SUBTYPE_ARM_V7, CPU_SUBTYPE_ARM_V7EM, CPU_SUBTYPE_ARM_V7F, CPU_SUBTYPE_ARM_V7K,
+            CPU_SUBTYPE_ARM_V7M, CPU_SUBTYPE_ARM_V7S, CPU_SUBTYPE_I386_ALL,
+            CPU_SUBTYPE_POWERPC_ALL, CPU_SUBTYPE_X86_64_ALL, CPU_SUBTYPE_X86_64_H, CPU_TYPE_ARM,
+            CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386, CPU_TYPE_I860,
+            CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC, CPU_TYPE_POWERPC64,
+            CPU_TYPE_SPARC, CPU_TYPE_X86_64,
         },
         fat::{FAT_MAGIC, SIZEOF_FAT_ARCH, SIZEOF_FAT_HEADER},
         Mach,
     },
     Object,
 };
+use llvm_bitcode::{bitcode::BitcodeElement, Bitcode};
 
 use crate::error::Error;
-use std::cmp::Ordering;
 
 const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
 const SIZEOF_FAT_ARCH_64: usize = 32;
+
+const LLVM_BITCODE_WRAPPER_MAGIC: u32 = 0x0B17C0DE;
 
 #[derive(Debug)]
 struct ThinArch {
@@ -42,6 +50,17 @@ pub struct FatWriter {
     arches: Vec<ThinArch>,
     max_align: i64,
     is_fat64: bool,
+}
+
+#[inline]
+fn unpack_u32(buf: &[u8]) -> io::Result<u32> {
+    if buf.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "not enough data for unpacking u32",
+        ));
+    }
+    Ok(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]))
 }
 
 impl FatWriter {
@@ -114,6 +133,25 @@ impl FatWriter {
                 };
                 self.arches.push(thin);
             }
+            Object::Unknown(_) => {
+                let magic = unpack_u32(&bytes)?;
+                if magic == LLVM_BITCODE_WRAPPER_MAGIC {
+                    let (cpu_type, cpu_subtype) = self.get_arch_from_bitcode(&bytes)?;
+                    let align = 1;
+                    if align > self.max_align {
+                        self.max_align = align;
+                    }
+                    let thin = ThinArch {
+                        data: bytes,
+                        cpu_type,
+                        cpu_subtype,
+                        align,
+                    };
+                    self.arches.push(thin);
+                } else {
+                    return Err(Error::InvalidMachO("input is not a macho file".to_string()));
+                }
+            }
             _ => return Err(Error::InvalidMachO("input is not a macho file".to_string())),
         }
         // Sort the files by alignment to save space in ouput
@@ -132,6 +170,61 @@ impl FatWriter {
             a.align.cmp(&b.align)
         });
         Ok(())
+    }
+
+    fn get_arch_from_bitcode(&self, buffer: &[u8]) -> Result<(CpuType, CpuSubType), Error> {
+        let bitcode = Bitcode::new(buffer)?;
+        let target_triple = bitcode
+            .elements
+            .iter()
+            .find(|ele| match ele {
+                BitcodeElement::Record(_) => false,
+                BitcodeElement::Block(block) => block.id == 8,
+            })
+            .and_then(|module_block| {
+                module_block
+                    .as_block()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .find(|ele| match ele {
+                        BitcodeElement::Record(record) => record.id == 2,
+                        BitcodeElement::Block(_) => false,
+                    })
+            })
+            .and_then(|target_triple_record| {
+                let record = target_triple_record.as_record().unwrap();
+                let fields: Vec<u8> = record.fields.iter().map(|x| *x as u8).collect();
+                String::from_utf8(fields).ok()
+            });
+        if let Some(triple) = target_triple {
+            if let Some(triple) = triple.splitn(2, "-").next() {
+                return Ok(match triple {
+                    "i686" | "i386" => (CPU_TYPE_I386, CPU_SUBTYPE_I386_ALL),
+                    "x86_64" => (CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL),
+                    "x86_64h" => (CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_H),
+                    "powerpc" => (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_ALL),
+                    "powerpc64" => (CPU_TYPE_POWERPC64, CPU_SUBTYPE_POWERPC_ALL),
+                    "arm" => (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V4T),
+                    "armv5" | "armv5e" | "thumbv5" | "thumbv5e" => {
+                        (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V5TEJ)
+                    }
+                    "armv6" | "thumbv6" => (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V6),
+                    "armv6m" | "thumbv6m" => (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V6M),
+                    "armv7" | "thumbv7" => (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7),
+                    "armv7f" | "thumbv7f" => (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7F),
+                    "armv7s" | "thumbv7s" => (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7S),
+                    "armv7k" | "thumbv7k" => (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7K),
+                    "armv7m" | "thumbv7m" => (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7M),
+                    "armv7em" | "thumbv7em" => (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7EM),
+                    "arm64" => (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL),
+                    "arm64e" => (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_E),
+                    "arm64_32" => (CPU_TYPE_ARM64_32, CPU_SUBTYPE_ARM64_32_ALL),
+                    _ => return Err(Error::InvalidMachO("input is not a macho file".to_string())),
+                });
+            }
+        }
+        Err(Error::InvalidMachO("input is not a macho file".to_string()))
     }
 
     fn check_archive(&self, buffer: &[u8], ar: &Archive) -> Result<(u32, u32), Error> {
@@ -341,6 +434,22 @@ mod tests {
         assert!(reader.is_ok());
 
         fat.write_to_file("tests/output/fat.a").unwrap();
+    }
+
+    #[test]
+    fn test_fat_writer_add_llvm_bitcode() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/thin_x86_64.bc").unwrap();
+        let f2 = fs::read("tests/fixtures/thin_arm64.bc").unwrap();
+        fat.add(f1).unwrap();
+        fat.add(f2).unwrap();
+        let mut out = Vec::new();
+        fat.write_to(&mut out).unwrap();
+
+        let reader = FatReader::new(&out);
+        assert!(reader.is_ok());
+
+        fat.write_to_file("tests/output/fat_bc").unwrap();
     }
 
     #[test]
