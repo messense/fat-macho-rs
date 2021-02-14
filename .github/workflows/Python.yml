@@ -24,12 +24,14 @@ jobs:
       run: |
         docker build -t maturin:latest -f python/Dockerfile .
         docker run --rm -v $(pwd):/io maturin:latest sh -c "source ~/.cargo/env && maturin build -i $PYTHON_VERSION --release --out dist -m python/Cargo.toml"
+        pip install fat-macho --no-index --find-links dist --force-reinstall
 
     - name: Build Wheels - Windows
       if: startsWith(matrix.os, 'windows')
       run: |
         pip install maturin
         maturin build -i python --release --out dist -m python/Cargo.toml
+        pip install fat-macho --no-index --find-links dist --force-reinstall
 
     - name: Build Wheels - macOS
       if: startsWith(matrix.os, 'macos')
@@ -48,6 +50,7 @@ jobs:
         maturin build -i python --target x86_64-apple-darwin --release --out dist -m python/Cargo.toml
         maturin build -i python --target aarch64-apple-darwin --release --out dist -m python/Cargo.toml
         maturin build -i python --release --universal2 --out dist -m python/Cargo.toml
+        pip install fat-macho --no-index --find-links dist --force-reinstall
 
     - name: Upload wheels
       uses: actions/upload-artifact@v2
