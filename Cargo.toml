@@ -14,9 +14,3 @@ repository = "https://github.com/messense/fat-macho-rs.git"
 [dependencies]
 goblin = "0.3"
 llvm-bitcode = "0.1.1"
-
-[workspace]
-members = [
-    ".",
-    "python"
-]

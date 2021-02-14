@@ -1,5 +1,5 @@
 [package]
-name = "fat-macho-py"
+name = "fat-macho"
 version = "0.1.0"
 authors = ["messense <messense@icloud.com>"]
 edition = "2018"
