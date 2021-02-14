@@ -25,11 +25,29 @@ jobs:
         docker build -t maturin:latest -f python/Dockerfile .
         docker run --rm -v $(pwd):/io maturin:latest sh -c "source ~/.cargo/env && maturin build -i $PYTHON_VERSION --release --out dist -m python/Cargo.toml"
 
-    - name: Build Wheels - Non-Linux
-      if: startsWith(matrix.os, 'windows') || startsWith(matrix.os, 'macos')
+    - name: Build Wheels - Windows
+      if: startsWith(matrix.os, 'windows')
       run: |
         pip install maturin
         maturin build -i python --release --out dist -m python/Cargo.toml
+
+    - name: Build Wheels - macOS
+      if: startsWith(matrix.os, 'macos')
+      run: |
+        # Setup Xcode
+        echo "PYO3_CROSS_LIB_DIR=/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.8/lib" >> "${GITHUB_ENV}"
+        sudo xcode-select -s /Applications/Xcode_12.3.app
+        bindir="$(xcode-select --print-path)/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+        echo "CC=${bindir}/clang" >> "${GITHUB_ENV}"
+        echo "CXX=${bindir}/clang++" >> "${GITHUB_ENV}"
+        echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "${GITHUB_ENV}"
+        # Install rustup targets
+        rustup target add x86_64-apple-darwin aarch64-apple-darwin
+        # Build wheels
+        pip install maturin
+        maturin build -i python --target x86_64-apple-darwin --release --out dist -m python/Cargo.toml
+        maturin build -i python --target aarch64-apple-darwin --release --out dist -m python/Cargo.toml
+        maturin build -i python --release --universal2 --out dist -m python/Cargo.toml
 
     - name: Upload wheels
       uses: actions/upload-artifact@v2
