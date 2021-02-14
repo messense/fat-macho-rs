@@ -2,9 +2,13 @@
 name = "py-fat-macho"
 version = "0.4.2"
 authors = ["messense <messense@icloud.com>"]
+description = "Mach-O fat binary writer"
 edition = "2018"
 license = "MIT"
+keywords = ["fat", "mach", "macho"]
 readme = "README.md"
+homepage = "https://github.com/messense/fat-macho-rs"
+repository = "https://github.com/messense/fat-macho-rs.git"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
