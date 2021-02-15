@@ -45,7 +45,14 @@ jobs:
         maturin build -i python --release --out dist -m python/Cargo.toml --target ${{ matrix.platform.rust-target }}
         pip install fat-macho --no-index --find-links dist --force-reinstall
 
-    - name: Build Wheels - macOS
+    - name: Build Wheels - macOS x86_64
+      if: startsWith(matrix.platform.os, 'macos')
+      run: |
+        pip install maturin
+        maturin build -i python --target x86_64-apple-darwin --release --out dist -m python/Cargo.toml
+        pip install fat-macho --no-index --find-links dist --force-reinstall
+
+    - name: Build Wheels - macOS universal2
       if: startsWith(matrix.platform.os, 'macos')
       env:
         MACOSX_DEPLOYMENT_TARGET: '10.9'
@@ -58,11 +65,8 @@ jobs:
         echo "CXX=${bindir}/clang++" >> "${GITHUB_ENV}"
         echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "${GITHUB_ENV}"
         # Install rustup targets
-        rustup target add x86_64-apple-darwin aarch64-apple-darwin
+        rustup target add aarch64-apple-darwin
         # Build wheels
-        pip install maturin
-        maturin build -i python --target x86_64-apple-darwin --release --out dist -m python/Cargo.toml
-        maturin build -i python --target aarch64-apple-darwin --release --out dist -m python/Cargo.toml
         maturin build -i python --release --universal2 --out dist -m python/Cargo.toml
         pip install fat-macho --no-index --find-links dist --force-reinstall
 
