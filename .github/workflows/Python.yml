@@ -162,4 +162,4 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
         run: |
           pip install --upgrade wheel pip setuptools twine
-          twine upload *
+          twine upload --skip-existing *
