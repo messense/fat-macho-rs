@@ -5,90 +5,161 @@ on:
   pull_request:
 
 jobs:
-  Build:
-    runs-on: ${{ matrix.platform.os }}
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+        with:
+          python-version: 3.6
+          architecture: x64
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: aarch64-apple-darwin
+          profile: minimal
+          default: true
+      - name: Install maturin
+        run: pip install maturin
+      - name: Build wheels - x86_64
+        run: |
+          maturin build -i python --target x86_64-apple-darwin --release --out dist -m python/Cargo.toml
+          pip install fat-macho --no-index --find-links dist --force-reinstall
+          python -c "import fat_macho"
+      - name: Build wheels - universal2
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '10.9'
+          PYO3_CROSS_LIB_DIR: /Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.8/lib
+        run: |
+          # Setup Xcode
+          sudo xcode-select -s /Applications/Xcode_12.3.app
+          bindir="$(xcode-select --print-path)/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          echo "CC=${bindir}/clang" >> "${GITHUB_ENV}"
+          echo "CXX=${bindir}/clang++" >> "${GITHUB_ENV}"
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "${GITHUB_ENV}"
+          # Build wheels
+          maturin build -i python --release --universal2 --out dist --no-sdist -m python/Cargo.toml
+          pip install fat-macho --no-index --find-links dist --force-reinstall
+          python -c "import fat_macho"
+      - name: Upload wheels
+        uses: actions/upload-artifact@v2
+        with:
+          name: wheels
+          path: dist
+
+  windows:
+    runs-on: windows-latest
     strategy:
       matrix:
         platform: [
-          { os: "macos-latest",   python-architecture: "x64", rust-target: "x86_64-apple-darwin" },
-          { os: "ubuntu-latest", python-architecture: "x64", rust-target: "x86_64-unknown-linux-gnu" },
-          { os: "windows-latest", python-architecture: "x64", rust-target: "x86_64-pc-windows-msvc" },
-          { os: "windows-latest", python-architecture: "x86", rust-target: "i686-pc-windows-msvc" },
+          { python-architecture: "x64", target: "x86_64-pc-windows-msvc" },
+          { python-architecture: "x86", target: "i686-pc-windows-msvc" },
         ]
-        python-version: [3.6]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+        with:
+          python-version: 3.6
+          architecture: ${{ matrix.platform.python-architecture }}
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.platform.target }}
+          profile: minimal
+          default: true
+      - name: Install maturin
+        run: pip install maturin
+      - name: Build wheels
+        run: |
+          maturin build -i python --release --out dist --no-sdist -m python/Cargo.toml --target ${{ matrix.platform.target }}
+          pip install fat-macho --no-index --find-links dist --force-reinstall
+          python -c "import fat_macho"
+      - name: Upload wheels
+        uses: actions/upload-artifact@v2
+        with:
+          name: wheels
+          path: dist
+
+  linux:
+    runs-on: ubuntu-16.04
+    strategy:
+      matrix:
+        platform: [
+          { manylinux: "2010", target: "x86_64-unknown-linux-gnu" },
+          { manylinux: "2014", target: "aarch64-unknown-linux-gnu" },
+        ]
     steps:
     - uses: actions/checkout@v2
     - uses: actions/setup-python@v2
       with:
-        python-version: ${{ matrix.python-version }}
-        architecture: ${{ matrix.platform.python-architecture }}
+        python-version: 3.6
+        architecture: x64
     - name: Install Rust toolchain
       uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
-        target: ${{ matrix.platform.rust-target }}
+        target: ${{ matrix.platform.target }}
         profile: minimal
         default: true
-    - name: Build Wheels - Linux
-      if: startsWith(matrix.platform.os, 'ubuntu')
-      env:
-        PYTHON_VERSION: python${{ matrix.python-version }}
+    - name: Install GCC cross compiler
+      if: matrix.platform.target == 'aarch64-unknown-linux-gnu'
       run: |
-        docker build -t maturin:latest -f python/Dockerfile .
-        docker run --rm -v $(pwd):/io maturin:latest sh -c "source ~/.cargo/env && maturin build -i $PYTHON_VERSION --release --out dist -m python/Cargo.toml"
-        pip install fat-macho --no-index --find-links dist --force-reinstall
-
-    - name: Build Wheels - Windows
-      if: startsWith(matrix.platform.os, 'windows')
+        sudo apt-get install -y gcc-aarch64-linux-gnu libc6-arm64-cross libc6-dev-arm64-cross
+        echo "TARGET_CC=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+        echo "TARGET_CXX=aarch64-linux-gnu-cpp" >> "$GITHUB_ENV"
+        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+    - name: Install maturin
+      run: pip install maturin
+    - name: Build Wheels
       run: |
-        pip install maturin
-        maturin build -i python --release --out dist -m python/Cargo.toml --target ${{ matrix.platform.rust-target }}
-        pip install fat-macho --no-index --find-links dist --force-reinstall
-
-    - name: Build Wheels - macOS x86_64
-      if: startsWith(matrix.platform.os, 'macos')
+        maturin build -i python --release --out dist --no-sdist -m python/Cargo.toml --target ${{ matrix.platform.target }} --manylinux ${{ matrix.platform.manylinux }}
+    - name: Install built wheel
+      if: matrix.platform.target == 'x86_64-unknown-linux-gnu'
       run: |
-        pip install maturin
-        maturin build -i python --target x86_64-apple-darwin --release --out dist -m python/Cargo.toml
         pip install fat-macho --no-index --find-links dist --force-reinstall
-
-    - name: Build Wheels - macOS universal2
-      if: startsWith(matrix.platform.os, 'macos')
-      env:
-        MACOSX_DEPLOYMENT_TARGET: '10.9'
-        PYO3_CROSS_LIB_DIR: /Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.8/lib
-      run: |
-        # Setup Xcode
-        sudo xcode-select -s /Applications/Xcode_12.3.app
-        bindir="$(xcode-select --print-path)/Toolchains/XcodeDefault.xctoolchain/usr/bin"
-        echo "CC=${bindir}/clang" >> "${GITHUB_ENV}"
-        echo "CXX=${bindir}/clang++" >> "${GITHUB_ENV}"
-        echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "${GITHUB_ENV}"
-        # Install rustup targets
-        rustup target add aarch64-apple-darwin
-        # Build wheels
-        maturin build -i python --release --universal2 --out dist -m python/Cargo.toml
-        pip install fat-macho --no-index --find-links dist --force-reinstall
-
+        python -c "import fat_macho"
+    - uses: uraimo/run-on-arch-action@v2.0.5
+      if: matrix.platform.target == 'aarch64-unknown-linux-gnu'
+      name: Install built wheel
+      with:
+        arch: aarch64
+        distro: ubuntu18.04
+        githubToken: ${{ github.token }}
+        # Mount the dist directory as /artifacts in the container
+        dockerRunArgs: |
+          --volume "${PWD}/dist:/artifacts"
+        install: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-pip
+          pip3 install -U pip
+        run: |
+          ls -lrth /artifacts
+          pip3 install fat-macho --no-index --find-links /artifacts --force-reinstall
+          python3 -c "import fat_macho"
     - name: Upload wheels
       uses: actions/upload-artifact@v2
       with:
         name: wheels
         path: dist
 
-    - name: Publish package - Non-Linux
-      if: startsWith(github.ref, 'refs/tags/') && (startsWith(matrix.platform.os, 'windows') || startsWith(matrix.platform.os, 'macos'))
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.pypi_password }}
-      run: |
-          pip install twine
-          twine upload --skip-existing dist/*
-
-    - name: Publish package - Linux
-      if: startsWith(github.ref, 'refs/tags/') && matrix.platform.os == 'ubuntu-latest'
-      uses: pypa/gh-action-pypi-publish@master
-      with:
-        user: __token__
-        password: ${{ secrets.pypi_password }}
-        skip_existing: true
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: "startsWith(github.ref, 'refs/tags/')"
+    needs: [ macos, windows, linux ]
+    steps:
+      - uses: actions/download-artifact@v2
+        with:
+          name: wheels
+      - uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+      - name: Publish to PyPi
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        run: |
+          pip install --upgrade wheel pip setuptools twine
+          twine upload *
