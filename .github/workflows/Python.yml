@@ -83,11 +83,39 @@ jobs:
           path: dist
 
   linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [
+          { manylinux: '2010', target: "x86_64-unknown-linux-gnu", arch: "x86_64" },
+          { manylinux: '2010', target: "i686-unknown-linux-gnu", arch: "i686" },
+        ]
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build Wheels
+      run: |
+        echo 'curl --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+        source ~/.cargo/env
+        export PATH=/opt/python/cp38-cp38/bin:$PATH
+        pip install maturin
+        maturin build -i python --release --out dist --no-sdist -m python/Cargo.toml --target ${{ matrix.platform.target }} --manylinux ${{ matrix.platform.manylinux }}
+        pip install fat-macho --no-index --find-links dist --force-reinstall
+        python -c "import fat_macho"
+        ' > build-wheel.sh
+        chmod +x build-wheel.sh
+
+        docker run --rm -v "$PWD":/io -w /io quay.io/pypa/manylinux2014_${{ matrix.platform.arch }} bash build-wheel.sh
+    - name: Upload wheels
+      uses: actions/upload-artifact@v2
+      with:
+        name: wheels
+        path: dist
+
+  linux-cross:
     runs-on: ubuntu-16.04
     strategy:
       matrix:
         platform: [
-          { manylinux: "2010", target: "x86_64-unknown-linux-gnu", arch: "x86_64" },
           { manylinux: "2014", target: "aarch64-unknown-linux-gnu", arch: "aarch64" },
           { manylinux: "2014", target: "armv7-unknown-linux-gnueabihf", arch: "armv7" },
         ]
@@ -123,13 +151,7 @@ jobs:
     - name: Build Wheels
       run: |
         maturin build -i python --release --out dist --no-sdist -m python/Cargo.toml --target ${{ matrix.platform.target }} --manylinux ${{ matrix.platform.manylinux }}
-    - name: Install built wheel
-      if: matrix.platform.arch == 'x86_64'
-      run: |
-        pip install fat-macho --no-index --find-links dist --force-reinstall
-        python -c "import fat_macho"
     - uses: uraimo/run-on-arch-action@v2.0.5
-      if: matrix.platform.arch != 'x86_64'
       name: Install built wheel
       with:
         arch: ${{ matrix.platform.arch }}
@@ -156,7 +178,7 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     if: "startsWith(github.ref, 'refs/tags/')"
-    needs: [ macos, windows, linux ]
+    needs: [ macos, windows, linux, linux-cross ]
     steps:
       - uses: actions/download-artifact@v2
         with:
