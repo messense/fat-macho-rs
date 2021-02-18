@@ -87,8 +87,9 @@ jobs:
     strategy:
       matrix:
         platform: [
-          { manylinux: "2010", target: "x86_64-unknown-linux-gnu" },
-          { manylinux: "2014", target: "aarch64-unknown-linux-gnu" },
+          { manylinux: "2010", target: "x86_64-unknown-linux-gnu", arch: "x86_64" },
+          { manylinux: "2014", target: "aarch64-unknown-linux-gnu", arch: "aarch64" },
+          { manylinux: "2014", target: "armv7-unknown-linux-gnueabihf", arch: "armv7" },
         ]
     steps:
     - uses: actions/checkout@v2
@@ -103,28 +104,35 @@ jobs:
         target: ${{ matrix.platform.target }}
         profile: minimal
         default: true
-    - name: Install GCC cross compiler
+    - name: Install aarch64 cross compiler
       if: matrix.platform.target == 'aarch64-unknown-linux-gnu'
       run: |
         sudo apt-get install -y gcc-aarch64-linux-gnu libc6-arm64-cross libc6-dev-arm64-cross
         echo "TARGET_CC=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
         echo "TARGET_CXX=aarch64-linux-gnu-cpp" >> "$GITHUB_ENV"
         echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+    - name: Install armv7 cross compiler
+      if: matrix.platform.target == 'armv7-unknown-linux-gnueabihf'
+      run: |
+        sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-armhf-cross libc6-dev-armhf-cross
+        echo "TARGET_CC=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
+        echo "TARGET_CXX=arm-linux-gnueabihf-cpp" >> "$GITHUB_ENV"
+        echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
     - name: Install maturin
       run: pip install maturin
     - name: Build Wheels
       run: |
         maturin build -i python --release --out dist --no-sdist -m python/Cargo.toml --target ${{ matrix.platform.target }} --manylinux ${{ matrix.platform.manylinux }}
     - name: Install built wheel
-      if: matrix.platform.target == 'x86_64-unknown-linux-gnu'
+      if: matrix.platform.arch == 'x86_64'
       run: |
         pip install fat-macho --no-index --find-links dist --force-reinstall
         python -c "import fat_macho"
     - uses: uraimo/run-on-arch-action@v2.0.5
-      if: matrix.platform.target == 'aarch64-unknown-linux-gnu'
+      if: matrix.platform.arch != 'x86_64'
       name: Install built wheel
       with:
-        arch: aarch64
+        arch: ${{ matrix.platform.arch }}
         distro: ubuntu18.04
         githubToken: ${{ github.token }}
         # Mount the dist directory as /artifacts in the container
