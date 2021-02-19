@@ -29,15 +29,10 @@ jobs:
           python -c "import fat_macho"
       - name: Build wheels - universal2
         env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
           MACOSX_DEPLOYMENT_TARGET: '10.9'
           PYO3_CROSS_LIB_DIR: /Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.8/lib
         run: |
-          # Setup Xcode
-          sudo xcode-select -s /Applications/Xcode_12.3.app
-          bindir="$(xcode-select --print-path)/Toolchains/XcodeDefault.xctoolchain/usr/bin"
-          echo "CC=${bindir}/clang" >> "${GITHUB_ENV}"
-          echo "CXX=${bindir}/clang++" >> "${GITHUB_ENV}"
-          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "${GITHUB_ENV}"
           # Build wheels
           maturin build -i python --release --universal2 --out dist --no-sdist -m python/Cargo.toml
           pip install fat-macho --no-index --find-links dist --force-reinstall
