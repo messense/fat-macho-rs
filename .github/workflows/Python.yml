@@ -99,7 +99,7 @@ jobs:
         ' > build-wheel.sh
         chmod +x build-wheel.sh
 
-        docker run --rm -v "$PWD":/io -w /io quay.io/pypa/manylinux2014_${{ matrix.platform.arch }} bash build-wheel.sh
+        docker run --rm -v "$PWD":/io -w /io quay.io/pypa/manylinux${{ matrix.platform.manylinux }}_${{ matrix.platform.arch }} bash build-wheel.sh
     - name: Upload wheels
       uses: actions/upload-artifact@v2
       with:
