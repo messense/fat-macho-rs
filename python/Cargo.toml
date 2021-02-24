@@ -1,6 +1,6 @@
 [package]
 name = "py-fat-macho"
-version = "0.4.6"
+version = "0.4.7"
 authors = ["messense <messense@icloud.com>"]
 description = "Mach-O fat binary writer"
 edition = "2018"
