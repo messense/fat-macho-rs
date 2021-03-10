@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 struct ErrorWrapper(fat_macho_rs::Error);
 
 /// Mach-O fat binary writer
-#[pyclass]
+#[pyclass(module = "fat_macho")]
 struct FatWriter {
     inner: fat_macho_rs::FatWriter,
 }
