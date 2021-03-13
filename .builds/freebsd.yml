@@ -1,0 +1,10 @@
+image: freebsd/latest
+packages:
+  - rust
+  - cmake
+sources:
+  - https://github.com/messense/fat-macho-rs
+tasks:
+  - test: |
+      cd fat-macho-rs
+      cargo test
