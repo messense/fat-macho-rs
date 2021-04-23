@@ -1,6 +1,6 @@
 [package]
 name = "fat-macho"
-version = "0.4.2"
+version = "0.4.3"
 authors = ["messense <messense@icloud.com>"]
 description = "Mach-O Fat Binary Reader and Writer"
 keywords = ["fat", "mach", "macho", "universal", "universal2"]
