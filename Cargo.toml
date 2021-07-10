@@ -13,4 +13,8 @@ repository = "https://github.com/messense/fat-macho-rs.git"
 
 [dependencies]
 goblin = "0.4"
-llvm-bitcode = "0.1.1"
+llvm-bitcode = { version = "0.1.1", optional = true }
+
+[features]
+default = ["bitcode"]
+bitcode = ["llvm-bitcode"]

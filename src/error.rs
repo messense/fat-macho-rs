@@ -7,6 +7,7 @@ pub enum Error {
     NotFatBinary,
     InvalidMachO(String),
     DuplicatedArch(String),
+    #[cfg(feature = "bitcode")]
     Bitcode(llvm_bitcode::read::Error),
 }
 
@@ -18,6 +19,7 @@ impl fmt::Display for Error {
             Error::NotFatBinary => write!(f, "input is not a valid Mach-O fat binary"),
             Error::InvalidMachO(err) => write!(f, "{}", err),
             Error::DuplicatedArch(arch) => write!(f, "duplicated architecture {}", arch),
+            #[cfg(feature = "bitcode")]
             Error::Bitcode(err) => err.fmt(f),
         }
     }
@@ -31,6 +33,7 @@ impl error::Error for Error {
             Error::NotFatBinary => None,
             Error::InvalidMachO(_) => None,
             Error::DuplicatedArch(_) => None,
+            #[cfg(feature = "bitcode")]
             Error::Bitcode(err) => Some(err),
         }
     }
@@ -48,6 +51,7 @@ impl From<goblin::error::Error> for Error {
     }
 }
 
+#[cfg(feature = "bitcode")]
 impl From<llvm_bitcode::read::Error> for Error {
     fn from(err: llvm_bitcode::read::Error) -> Self {
         Self::Bitcode(err)

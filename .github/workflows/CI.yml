@@ -33,6 +33,10 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
+          args: --no-default-features
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
       - run: cargo clean
         if: matrix.os == 'ubuntu-latest'
       - name: Run cargo-tarpaulin

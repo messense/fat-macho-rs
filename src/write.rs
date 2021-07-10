@@ -8,25 +8,29 @@ use std::{
     path::Path,
 };
 
+#[cfg(feature = "bitcode")]
+use goblin::mach::cputype::{
+    CPU_SUBTYPE_ARM64_32_ALL, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64_E, CPU_SUBTYPE_ARM_V4T,
+    CPU_SUBTYPE_ARM_V5TEJ, CPU_SUBTYPE_ARM_V6, CPU_SUBTYPE_ARM_V6M, CPU_SUBTYPE_ARM_V7,
+    CPU_SUBTYPE_ARM_V7EM, CPU_SUBTYPE_ARM_V7F, CPU_SUBTYPE_ARM_V7K, CPU_SUBTYPE_ARM_V7M,
+    CPU_SUBTYPE_ARM_V7S, CPU_SUBTYPE_I386_ALL, CPU_SUBTYPE_POWERPC_ALL, CPU_SUBTYPE_X86_64_ALL,
+    CPU_SUBTYPE_X86_64_H,
+};
 use goblin::{
     archive::Archive,
     mach::{
         cputype::{
             get_arch_from_flag, get_arch_name_from_types, CpuSubType, CpuType, CPU_ARCH_ABI64,
-            CPU_SUBTYPE_ARM64_32_ALL, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64_E,
-            CPU_SUBTYPE_ARM_V4T, CPU_SUBTYPE_ARM_V5TEJ, CPU_SUBTYPE_ARM_V6, CPU_SUBTYPE_ARM_V6M,
-            CPU_SUBTYPE_ARM_V7, CPU_SUBTYPE_ARM_V7EM, CPU_SUBTYPE_ARM_V7F, CPU_SUBTYPE_ARM_V7K,
-            CPU_SUBTYPE_ARM_V7M, CPU_SUBTYPE_ARM_V7S, CPU_SUBTYPE_I386_ALL,
-            CPU_SUBTYPE_POWERPC_ALL, CPU_SUBTYPE_X86_64_ALL, CPU_SUBTYPE_X86_64_H, CPU_TYPE_ARM,
-            CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386, CPU_TYPE_I860,
-            CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC, CPU_TYPE_POWERPC64,
-            CPU_TYPE_SPARC, CPU_TYPE_X86_64,
+            CPU_TYPE_ARM, CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386,
+            CPU_TYPE_I860, CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC,
+            CPU_TYPE_POWERPC64, CPU_TYPE_SPARC, CPU_TYPE_X86_64,
         },
         fat::{FAT_MAGIC, SIZEOF_FAT_ARCH, SIZEOF_FAT_HEADER},
         Mach,
     },
     Object,
 };
+#[cfg(feature = "bitcode")]
 use llvm_bitcode::{bitcode::BitcodeElement, Bitcode};
 
 use crate::error::Error;
@@ -136,18 +140,26 @@ impl FatWriter {
             Object::Unknown(_) => {
                 let magic = unpack_u32(&bytes)?;
                 if magic == LLVM_BITCODE_WRAPPER_MAGIC {
-                    let (cpu_type, cpu_subtype) = self.get_arch_from_bitcode(&bytes)?;
-                    let align = 1;
-                    if align > self.max_align {
-                        self.max_align = align;
+                    #[cfg(feature = "bitcode")]
+                    {
+                        let (cpu_type, cpu_subtype) = self.get_arch_from_bitcode(&bytes)?;
+                        let align = 1;
+                        if align > self.max_align {
+                            self.max_align = align;
+                        }
+                        let thin = ThinArch {
+                            data: bytes,
+                            cpu_type,
+                            cpu_subtype,
+                            align,
+                        };
+                        self.arches.push(thin);
                     }
-                    let thin = ThinArch {
-                        data: bytes,
-                        cpu_type,
-                        cpu_subtype,
-                        align,
-                    };
-                    self.arches.push(thin);
+
+                    #[cfg(not(feature = "bitcode"))]
+                    return Err(Error::InvalidMachO(
+                        "bitcode input is unsupported".to_string(),
+                    ));
                 } else {
                     return Err(Error::InvalidMachO("input is not a macho file".to_string()));
                 }
@@ -172,6 +184,7 @@ impl FatWriter {
         Ok(())
     }
 
+    #[cfg(feature = "bitcode")]
     fn get_arch_from_bitcode(&self, buffer: &[u8]) -> Result<(CpuType, CpuSubType), Error> {
         let bitcode = Bitcode::new(buffer)?;
         let target_triple = bitcode
@@ -436,6 +449,7 @@ mod tests {
         fat.write_to_file("tests/output/fat.a").unwrap();
     }
 
+    #[cfg(feature = "bitcode")]
     #[test]
     fn test_fat_writer_add_llvm_bitcode() {
         let mut fat = FatWriter::new();
