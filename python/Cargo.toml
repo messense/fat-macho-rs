@@ -18,7 +18,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 fat-macho-rs = { package = "fat-macho", version = "0.4.3" }
-pyo3 = { version = "0.14.1", features = ["abi3-py36", "extension-module"] }
+pyo3 = { version = "0.15.0", features = ["abi3-py36", "extension-module"] }
 
 [package.metadata.maturin]
 name = "fat_macho"
