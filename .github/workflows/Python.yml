@@ -90,7 +90,7 @@ jobs:
       with:
         python-version: 3.9
         architecture: x64
-    - name: Build Wheels
+    - name: Build wheels
       uses: messense/maturin-action@v1
       with:
         target: ${{ matrix.target }}
@@ -99,8 +99,8 @@ jobs:
     - name: Install built wheel
       if: matrix.target == 'x86_64-unknown-linux-gnu'
       run: |
-        pip install fat-macho --no-index --find-links dist --force-reinstall
-        python -c "import fat_macho"
+        pip3 install fat-macho --no-index --find-links dist --force-reinstall
+        python3 -c "import fat_macho"
     - name: Upload wheels
       uses: actions/upload-artifact@v2
       with:
@@ -111,19 +111,23 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        platform: [
-          { target: "aarch64-unknown-linux-gnu", arch: "aarch64" },
-          { target: "armv7-unknown-linux-gnueabihf", arch: "armv7" },
-          { target: "s390x-unknown-linux-gnu", arch: "s390x" },
-          { target: "powerpc64le-unknown-linux-gnu", arch: "ppc64le" },
-          { target: "powerpc64-unknown-linux-gnu", arch: "ppc64" },
-        ]
+        platform:
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+          - target: armv7-unknown-linux-gnueabihf
+            arch: armv7
+          - target: s390x-unknown-linux-gnu
+            arch: s390x
+          - target: powerpc64le-unknown-linux-gnu
+            arch: ppc64le
+          - target: powerpc64-unknown-linux-gnu
+            arch: ppc64
     steps:
     - uses: actions/checkout@v2
     - uses: actions/setup-python@v2
       with:
         python-version: 3.9
-    - name: Build Wheels
+    - name: Build wheels
       uses: messense/maturin-action@v1
       with:
         target: ${{ matrix.platform.target }}
@@ -134,18 +138,89 @@ jobs:
       name: Install built wheel
       with:
         arch: ${{ matrix.platform.arch }}
-        distro: ubuntu18.04
+        distro: ubuntu20.04
         githubToken: ${{ github.token }}
-        # Mount the dist directory as /artifacts in the container
-        dockerRunArgs: |
-          --volume "${PWD}/dist:/artifacts"
         install: |
           apt-get update
           apt-get install -y --no-install-recommends python3 python3-pip
           pip3 install -U pip
         run: |
-          ls -lrth /artifacts
-          pip3 install fat-macho --no-index --find-links /artifacts --force-reinstall
+          pip3 install fat-macho --no-index --find-links dist/ --force-reinstall
+          python3 -c "import fat_macho"
+    - name: Upload wheels
+      uses: actions/upload-artifact@v2
+      with:
+        name: wheels
+        path: dist
+
+  musllinux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - i686-unknown-linux-musl
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/setup-python@v2
+      with:
+        python-version: 3.9
+        architecture: x64
+    - name: Build wheels
+      uses: messense/maturin-action@v1
+      with:
+        target: ${{ matrix.target }}
+        manylinux: musllinux_1_2
+        args: --release --out dist --no-sdist -m python/Cargo.toml
+    - name: Install built wheel
+      if: matrix.target == 'x86_64-unknown-linux-musl'
+      uses: addnab/docker-run-action@v3
+      with:
+        image: alpine:latest
+        options: -v ${{ github.workspace }}:/io -w /io
+        run: |
+          apk add py3-pip
+          pip3 install -U pip
+          pip3 install fat-macho --no-index --find-links /io/dist/ --force-reinstall
+          python3 -c "import fat_macho"
+    - name: Upload wheels
+      uses: actions/upload-artifact@v2
+      with:
+        name: wheels
+        path: dist
+
+
+  musllinux-cross:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform:
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+          - target: armv7-unknown-linux-musleabihf
+            arch: armv7
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/setup-python@v2
+      with:
+        python-version: 3.9
+    - name: Build wheels
+      uses: messense/maturin-action@v1
+      with:
+        target: ${{ matrix.platform.target }}
+        manylinux: musllinux_1_2
+        args: --release --out dist --no-sdist -m python/Cargo.toml
+    - uses: uraimo/run-on-arch-action@master
+      name: Install built wheel
+      with:
+        arch: ${{ matrix.platform.arch }}
+        distro: alpine_latest
+        githubToken: ${{ github.token }}
+        install: |
+          apk add py3-pip
+          pip3 install -U pip
+        run: |
+          pip3 install fat-macho --no-index --find-links dist/ --force-reinstall
           python3 -c "import fat_macho"
     - name: Upload wheels
       uses: actions/upload-artifact@v2
@@ -157,7 +232,7 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     if: "startsWith(github.ref, 'refs/tags/')"
-    needs: [ macos, windows, linux, linux-cross ]
+    needs: [ macos, windows, linux, linux-cross, musllinux, musllinux-cross ]
     steps:
       - uses: actions/download-artifact@v2
         with:
