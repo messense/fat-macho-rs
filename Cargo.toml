@@ -1,6 +1,6 @@
 [package]
 name = "fat-macho"
-version = "0.4.4"
+version = "0.4.5"
 authors = ["messense <messense@icloud.com>"]
 description = "Mach-O Fat Binary Reader and Writer"
 keywords = ["fat", "mach", "macho", "universal", "universal2"]
@@ -12,7 +12,7 @@ repository = "https://github.com/messense/fat-macho-rs.git"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-goblin = "0.5"
+goblin = "0.5.1"
 llvm-bitcode = { version = "0.1.1", optional = true }
 
 [features]
