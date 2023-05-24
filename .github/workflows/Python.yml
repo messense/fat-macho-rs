@@ -31,7 +31,8 @@ jobs:
       - name: Build wheels - universal2
         uses: messense/maturin-action@v1
         with:
-          args: --release --universal2 --out dist -m python/Cargo.toml
+          target: universal2-apple-darwin
+          args: --release --out dist -m python/Cargo.toml
       - name: Install built wheel - universal2
         run: |
           pip install fat-macho --no-index --find-links dist --force-reinstall
