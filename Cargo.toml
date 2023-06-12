@@ -1,10 +1,10 @@
 [package]
 name = "fat-macho"
-version = "0.4.6"
+version = "0.4.7"
 authors = ["messense <messense@icloud.com>"]
 description = "Mach-O Fat Binary Reader and Writer"
 keywords = ["fat", "mach", "macho", "universal", "universal2"]
-edition = "2018"
+edition = "2021"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/messense/fat-macho-rs.git"
