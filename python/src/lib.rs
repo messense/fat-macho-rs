@@ -67,7 +67,7 @@ impl From<ErrorWrapper> for PyErr {
 }
 
 #[pymodule]
-fn fat_macho(_py: Python, m: &PyModule) -> PyResult<()> {
+fn fat_macho(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<FatWriter>()?;
     Ok(())
