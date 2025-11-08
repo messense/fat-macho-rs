@@ -4,3 +4,4 @@ build-backend = "maturin"
 
 [project]
 name = "fat-macho"
+dynamic = ["version", "readme", "urls"]
