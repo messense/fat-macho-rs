@@ -207,7 +207,7 @@ impl FatWriter {
             })
             .and_then(|target_triple_record| {
                 let record = target_triple_record.as_record().unwrap();
-                let fields: Vec<u8> = record.fields.iter().map(|x| *x as u8).collect();
+                let fields: Vec<u8> = record.fields().iter().map(|x| *x as u8).collect();
                 String::from_utf8(fields).ok()
             });
         if let Some(triple) = target_triple {
