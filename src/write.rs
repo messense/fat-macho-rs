@@ -21,8 +21,8 @@ use goblin::{
     mach::{
         cputype::{
             get_arch_from_flag, get_arch_name_from_types, CpuSubType, CpuType, CPU_ARCH_ABI64,
-            CPU_TYPE_ARM, CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA, CPU_TYPE_I386,
-            CPU_TYPE_I860, CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC,
+            CPU_SUBTYPE_MASK, CPU_TYPE_ARM, CPU_TYPE_ARM64, CPU_TYPE_ARM64_32, CPU_TYPE_HPPA,
+            CPU_TYPE_I386, CPU_TYPE_I860, CPU_TYPE_MC680X0, CPU_TYPE_MC88000, CPU_TYPE_POWERPC,
             CPU_TYPE_POWERPC64, CPU_TYPE_SPARC, CPU_TYPE_X86_64,
         },
         fat::{FAT_MAGIC, SIZEOF_FAT_ARCH, SIZEOF_FAT_HEADER},
@@ -44,8 +44,28 @@ const LLVM_BITCODE_WRAPPER_MAGIC: u32 = 0x0B17C0DE;
 struct ThinArch {
     data: Vec<u8>,
     cpu_type: u32,
+    /// Raw `cpusubtype` from the Mach-O header, capability bits included,
+    /// so that they are preserved in the written `fat_arch` entry.
     cpu_subtype: u32,
     align: i64,
+}
+
+impl ThinArch {
+    /// Compare architectures ignoring the capability bits of `cpusubtype`
+    fn same_arch(&self, cpu_type: CpuType, cpu_subtype: CpuSubType) -> bool {
+        self.cpu_type == cpu_type
+            && strip_cpu_subtype_caps(self.cpu_subtype) == strip_cpu_subtype_caps(cpu_subtype)
+    }
+}
+
+/// Strip the capability bits (`CPU_SUBTYPE_MASK`, the high byte) from a `cpusubtype`.
+///
+/// Mach-O headers may carry feature flags in the high byte of `cpusubtype`,
+/// e.g. `CPU_SUBTYPE_PTRAUTH_ABI` (`0x80000000`) on arm64e binaries, which
+/// gives `cpusubtype == 0x80000002` instead of the bare `CPU_SUBTYPE_ARM64_E`.
+/// Like `lipo`, we ignore those bits when identifying an architecture.
+fn strip_cpu_subtype_caps(cpu_subtype: CpuSubType) -> CpuSubType {
+    cpu_subtype & !CPU_SUBTYPE_MASK
 }
 
 /// Mach-O fat binary writer
@@ -96,11 +116,11 @@ impl FatWriter {
                     if self
                         .arches
                         .iter()
-                        .find(|arch| arch.cpu_type == cpu_type && arch.cpu_subtype == cpu_subtype)
-                        .is_some()
+                        .any(|arch| arch.same_arch(cpu_type, cpu_subtype))
                     {
                         let arch =
-                            get_arch_name_from_types(cpu_type, cpu_subtype).unwrap_or("unknown");
+                            get_arch_name_from_types(cpu_type, strip_cpu_subtype_caps(cpu_subtype))
+                                .unwrap_or("unknown");
                         return Err(Error::DuplicatedArch(arch.to_string()));
                     }
                     if header.magic == FAT_MAGIC_64 {
@@ -264,7 +284,7 @@ impl FatWriter {
             if let Some(index) = self
                 .arches
                 .iter()
-                .position(|arch| arch.cpu_type == cpu_type && arch.cpu_subtype == cpu_subtype)
+                .position(|arch| arch.same_arch(cpu_type, cpu_subtype))
             {
                 return Some(self.arches.remove(index).data);
             }
@@ -278,8 +298,7 @@ impl FatWriter {
             return self
                 .arches
                 .iter()
-                .find(|arch| arch.cpu_type == cpu_type && arch.cpu_subtype == cpu_subtype)
-                .is_some();
+                .any(|arch| arch.same_arch(cpu_type, cpu_subtype));
         }
         false
     }
@@ -375,6 +394,10 @@ impl FatWriter {
 }
 
 fn get_align_from_cpu_types(cpu_type: CpuType, cpu_subtype: CpuSubType) -> i64 {
+    // `get_arch_name_from_types` matches on the exact (cputype, cpusubtype)
+    // pair, so the capability bits must be stripped first or e.g. arm64e
+    // (`cpusubtype == 0x80000002`) would not be recognized.
+    let cpu_subtype = strip_cpu_subtype_caps(cpu_subtype);
     if let Some(arch_name) = get_arch_name_from_types(cpu_type, cpu_subtype) {
         if let Some((cpu_type, _)) = get_arch_from_flag(arch_name) {
             match cpu_type {
@@ -390,14 +413,19 @@ fn get_align_from_cpu_types(cpu_type: CpuType, cpu_subtype: CpuSubType) -> i64 {
             }
         }
     }
-    0
+    // Unknown architecture: like `lipo`, guess high when unsure. This must
+    // never be 0, otherwise offset rounding in `write_to` divides by zero.
+    0x4000
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
 
+    use goblin::mach::cputype::{CPU_SUBTYPE_ARM64_E, CPU_SUBTYPE_MASK, CPU_TYPE_ARM64};
+
     use super::FatWriter;
+    use crate::error::Error;
     use crate::read::FatReader;
 
     #[test]
@@ -464,6 +492,77 @@ mod tests {
         assert!(reader.is_ok());
 
         fat.write_to_file("tests/output/fat_bc").unwrap();
+    }
+
+    #[test]
+    fn test_fat_writer_add_arm64e() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
+        let f2 = fs::read("tests/fixtures/thin_arm64e").unwrap();
+        fat.add(f1).unwrap();
+        fat.add(f2).unwrap();
+        assert!(fat.exists("x86_64"));
+        assert!(fat.exists("arm64e"));
+        assert!(!fat.exists("arm64"));
+
+        let mut out = Vec::new();
+        fat.write_to(&mut out).unwrap();
+        let reader = FatReader::new(&out).unwrap();
+        let arches = reader.arches().unwrap();
+        assert_eq!(arches.len(), 2);
+        for arch in &arches {
+            // arm64 family requires 2^14 alignment, and it's the max of all slices
+            assert_eq!(arch.align, 14);
+            assert_eq!(arch.offset % 0x4000, 0);
+        }
+        // capability bits are preserved in the fat_arch header
+        let arm64e = arches
+            .iter()
+            .find(|arch| arch.cputype == CPU_TYPE_ARM64)
+            .unwrap();
+        assert_eq!(arm64e.cpusubtype & !CPU_SUBTYPE_MASK, CPU_SUBTYPE_ARM64_E);
+        assert_ne!(arm64e.cpusubtype & CPU_SUBTYPE_MASK, 0);
+
+        fat.write_to_file("tests/output/fat_arm64e").unwrap();
+    }
+
+    #[test]
+    fn test_fat_writer_arm64e_only() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/thin_arm64e").unwrap();
+        fat.add(f1).unwrap();
+        let mut out = Vec::new();
+        // used to panic with "attempt to divide by zero"
+        fat.write_to(&mut out).unwrap();
+        let reader = FatReader::new(&out).unwrap();
+        let arches = reader.arches().unwrap();
+        assert_eq!(arches.len(), 1);
+        assert_eq!(arches[0].align, 14);
+        assert_eq!(arches[0].offset, 0x4000);
+    }
+
+    #[test]
+    fn test_fat_writer_add_duplicated_arm64e() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/thin_arm64e").unwrap();
+        fat.add(f1.clone()).unwrap();
+        match fat.add(f1) {
+            Err(Error::DuplicatedArch(arch)) => assert_eq!(arch, "arm64e"),
+            other => panic!("expected DuplicatedArch error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_fat_writer_remove_arm64e() {
+        let mut fat = FatWriter::new();
+        let f1 = fs::read("tests/fixtures/thin_x86_64").unwrap();
+        let f2 = fs::read("tests/fixtures/thin_arm64e").unwrap();
+        fat.add(f1).unwrap();
+        fat.add(f2).unwrap();
+        assert!(fat.remove("arm64").is_none());
+        assert!(fat.remove("arm64e").is_some());
+        assert!(fat.exists("x86_64"));
+        assert!(!fat.exists("arm64e"));
     }
 
     #[test]
