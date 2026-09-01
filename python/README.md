@@ -24,6 +24,8 @@ with open("x86_64_thin_file_path", "rb") as f:
     writer.add(f.read())
 with open("arm64_thin_file_path", "rb") as f:
     writer.add(f.read())
+# Or add a file directly, its contents are streamed when the fat binary is written
+writer.add_file("arm64e_thin_file_path")
 # Get Mach-O fat binary as bytes
 fat_bytes = writer.generate()
 # Write to file
