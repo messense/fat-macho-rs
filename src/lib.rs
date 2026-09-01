@@ -1,4 +1,5 @@
 mod error;
+mod parse;
 mod read;
 mod write;
 

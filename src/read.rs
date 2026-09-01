@@ -1,6 +1,7 @@
-use goblin::mach::{cputype::get_arch_from_flag, Mach, MultiArch};
+use goblin::mach::{cputype::get_arch_from_flag, MultiArch};
 
 use crate::error::Error;
+use crate::parse::{classify, Kind};
 
 /// Mach-O fat binary reader
 #[derive(Debug)]
@@ -11,23 +12,31 @@ pub struct FatReader<'a> {
 
 impl<'a> FatReader<'a> {
     /// Parse a Mach-O FAT binary from a buffer
+    ///
+    /// Only the fat header is inspected; the individual slices are not parsed.
     pub fn new(buffer: &'a [u8]) -> Result<Self, Error> {
-        match Mach::parse(buffer)? {
-            Mach::Fat(fat) => Ok(Self { buffer, fat }),
-            Mach::Binary(_) => Err(Error::NotFatBinary),
+        let magic = goblin::mach::peek(buffer, 0)?;
+        match classify(buffer)? {
+            Some(Kind::Fat) => Ok(Self {
+                buffer,
+                fat: MultiArch::new(buffer)?,
+            }),
+            Some(_) => Err(Error::NotFatBinary),
+            None => Err(goblin::error::Error::BadMagic(u64::from(magic)).into()),
         }
     }
 
     /// Extract thin binary by arch name
     pub fn extract(&self, arch_name: &str) -> Option<&'a [u8]> {
-        if let Some((cpu_type, _cpu_subtype)) = get_arch_from_flag(arch_name) {
-            return self
-                .fat
-                .find_cputype(cpu_type)
-                .unwrap_or_default()
-                .map(|arch| arch.slice(self.buffer));
-        }
-        None
+        let (cpu_type, _cpu_subtype) = get_arch_from_flag(arch_name)?;
+        let arch = self
+            .fat
+            .iter_arches()
+            .map_while(Result::ok)
+            .find(|arch| arch.cputype == cpu_type)?;
+        let start = arch.offset as usize;
+        let end = start.checked_add(arch.size as usize)?;
+        self.buffer.get(start..end)
     }
 }
 
@@ -90,6 +99,19 @@ mod test {
         let reader = FatReader::new(&buf);
         assert!(reader.is_err());
         assert!(matches!(reader.unwrap_err(), Error::NotFatBinary));
+    }
+
+    #[test]
+    fn test_fat_reader_garbage() {
+        assert!(matches!(FatReader::new(b"hello"), Err(Error::Goblin(_))));
+        assert!(matches!(FatReader::new(b"\0"), Err(Error::Goblin(_))));
+        // arch table claims more entries than the buffer holds
+        let mut buf = fs::read("tests/fixtures/simplefat").unwrap();
+        buf.truncate(8 + 20);
+        let reader = FatReader::new(&buf).unwrap();
+        assert!(reader.extract("x86_64").is_none());
+        assert!(reader.extract("arm64").is_none());
+        assert!(reader.extract("not-an-arch").is_none());
     }
 
     #[test]

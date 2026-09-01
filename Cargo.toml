@@ -1,6 +1,6 @@
 [package]
 name = "fat-macho"
-version = "0.4.12"
+version = "0.5.0"
 authors = ["messense <messense@icloud.com>"]
 description = "Mach-O Fat Binary Reader and Writer"
 keywords = ["fat", "mach", "macho", "universal", "universal2"]
@@ -18,3 +18,7 @@ llvm-bitcode = { version = "0.4", optional = true }
 [features]
 default = ["bitcode"]
 bitcode = ["llvm-bitcode"]
+
+[[bench]]
+name = "bench"
+harness = false
