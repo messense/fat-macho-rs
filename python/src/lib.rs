@@ -6,7 +6,7 @@ struct ErrorWrapper(fat_macho_rs::Error);
 /// Mach-O fat binary writer
 #[pyclass(module = "fat_macho")]
 struct FatWriter {
-    inner: fat_macho_rs::FatWriter,
+    inner: fat_macho_rs::FatWriter<'static>,
 }
 
 #[pymethods]
@@ -27,7 +27,7 @@ impl FatWriter {
 
     /// Remove an architecture
     fn remove(&mut self, arch: &str) -> Option<Vec<u8>> {
-        self.inner.remove(arch)
+        self.inner.remove(arch).map(|data| data.into_owned())
     }
 
     /// Check whether a certain architecture exists in this fat binary
@@ -43,7 +43,7 @@ impl FatWriter {
 
     /// Generate Mach-O fat binary and return bytes
     fn generate(&self) -> PyResult<Vec<u8>> {
-        let mut data = Vec::new();
+        let mut data = Vec::with_capacity(self.inner.total_size() as usize);
         self.inner.write_to(&mut data).map_err(ErrorWrapper)?;
         Ok(data)
     }
