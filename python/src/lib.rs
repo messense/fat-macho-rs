@@ -90,6 +90,7 @@ impl From<ErrorWrapper> for PyErr {
         match err.0 {
             Error::Io(_) => PyOSError::new_err(message),
             Error::Bitcode(_)
+            | Error::Goblin(_)
             | Error::InvalidMachO(_)
             | Error::DuplicatedArch(_)
             | Error::NotFatBinary => PyValueError::new_err(message),

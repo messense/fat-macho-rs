@@ -6,27 +6,28 @@
 //! buffers and files on disk.
 use std::fs::File;
 use std::io;
+use std::ops::Range;
 
-use crate::cputype::{arch_name, strip_cpu_subtype_caps, CpuSubType, CpuType};
+use goblin::{
+    archive::MAGIC as AR_MAGIC,
+    mach::{
+        cputype::{get_arch_name_from_types, CpuSubType, CpuType, CPU_SUBTYPE_MASK},
+        fat::FAT_MAGIC,
+        header::{MH_CIGAM, MH_CIGAM_64, MH_MAGIC, MH_MAGIC_64},
+    },
+};
+
 use crate::error::Error;
 
-/// `mach_header` magic, big-endian / little-endian, 32 / 64-bit
-pub(crate) const MH_MAGIC: u32 = 0xfeed_face;
-pub(crate) const MH_CIGAM: u32 = MH_MAGIC.swap_bytes();
-pub(crate) const MH_MAGIC_64: u32 = 0xfeed_facf;
-pub(crate) const MH_CIGAM_64: u32 = MH_MAGIC_64.swap_bytes();
-/// `fat_header` magic; fat headers are always big-endian
-pub(crate) const FAT_MAGIC: u32 = 0xcafe_babe;
-pub(crate) const FAT_MAGIC_64: u32 = 0xcafe_babf;
+/// `fat_header` magic of the 64-bit variant; fat headers are always big-endian
+pub(crate) const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
 /// Magic of the LLVM bitcode wrapper header, as a little-endian `u32`
 pub(crate) const LLVM_BITCODE_WRAPPER_MAGIC: u32 = 0x0B17_C0DE;
-/// `ar` archive magic
-pub(crate) const AR_MAGIC: &[u8; 8] = b"!<arch>\n";
 
-pub(crate) const SIZEOF_MACH_HEADER_32: usize = 28;
-pub(crate) const SIZEOF_MACH_HEADER_64: usize = 32;
-pub(crate) const SIZEOF_FAT_HEADER: usize = 8;
-pub(crate) const SIZEOF_FAT_ARCH: usize = 20;
+pub(crate) const SIZEOF_MACH_HEADER_32: usize = goblin::mach::header::SIZEOF_HEADER_32;
+pub(crate) const SIZEOF_MACH_HEADER_64: usize = goblin::mach::header::SIZEOF_HEADER_64;
+pub(crate) const SIZEOF_FAT_HEADER: usize = goblin::mach::fat::SIZEOF_FAT_HEADER;
+pub(crate) const SIZEOF_FAT_ARCH: usize = goblin::mach::fat::SIZEOF_FAT_ARCH;
 pub(crate) const SIZEOF_FAT_ARCH_64: usize = 32;
 const SIZEOF_AR_HEADER: u64 = 60;
 
@@ -94,6 +95,35 @@ pub(crate) fn file_read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Resu
     }
 }
 
+/// Strip the capability bits (`CPU_SUBTYPE_MASK`, the high byte) from a `cpusubtype`.
+///
+/// Mach-O headers may carry feature flags in the high byte of `cpusubtype`,
+/// e.g. `CPU_SUBTYPE_PTRAUTH_ABI` (`0x80000000`) on arm64e binaries, which
+/// gives `cpusubtype == 0x80000002` instead of the bare `CPU_SUBTYPE_ARM64_E`.
+/// Like `lipo`, we ignore those bits when identifying an architecture.
+#[inline]
+pub(crate) fn strip_cpu_subtype_caps(cpu_subtype: CpuSubType) -> CpuSubType {
+    cpu_subtype & !CPU_SUBTYPE_MASK
+}
+
+/// Architecture name for a `cputype` / `cpusubtype` pair, capability bits ignored
+pub(crate) fn arch_name(cpu_type: CpuType, cpu_subtype: CpuSubType) -> Option<&'static str> {
+    get_arch_name_from_types(cpu_type, strip_cpu_subtype_caps(cpu_subtype))
+}
+
+/// Whether `(cpu_type, cpu_subtype)` names the same architecture as
+/// `(other_type, other_subtype)`, ignoring capability bits
+#[inline]
+pub(crate) fn same_arch(
+    cpu_type: CpuType,
+    cpu_subtype: CpuSubType,
+    other_type: CpuType,
+    other_subtype: CpuSubType,
+) -> bool {
+    cpu_type == other_type
+        && strip_cpu_subtype_caps(cpu_subtype) == strip_cpu_subtype_caps(other_subtype)
+}
+
 /// The few `mach_header` fields we need
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MachHeader {
@@ -107,8 +137,7 @@ impl MachHeader {
     /// Compare architectures ignoring the capability bits of `cpusubtype`
     #[inline]
     pub(crate) fn same_arch(&self, cpu_type: CpuType, cpu_subtype: CpuSubType) -> bool {
-        self.cpu_type == cpu_type
-            && strip_cpu_subtype_caps(self.cpu_subtype) == strip_cpu_subtype_caps(cpu_subtype)
+        same_arch(self.cpu_type, self.cpu_subtype, cpu_type, cpu_subtype)
     }
 
     /// Human readable architecture name, e.g. `arm64e`
@@ -147,6 +176,35 @@ impl FatHeader {
     /// Byte range of the `fat_arch` table
     pub(crate) fn arch_table_len(&self) -> u64 {
         self.narches as u64 * self.arch_size() as u64
+    }
+}
+
+/// One `fat_arch` / `fat_arch_64` entry
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FatArchEntry {
+    pub(crate) offset: u64,
+    pub(crate) size: u64,
+}
+
+impl FatArchEntry {
+    /// Parse one entry of the `fat_arch` table
+    pub(crate) fn parse(entry: &[u8], is_fat64: bool) -> Option<Self> {
+        // cputype / cpusubtype are re-read from the slice's own header
+        let (offset, size) = if is_fat64 {
+            (read_u64_be(entry, 8)?, read_u64_be(entry, 16)?)
+        } else {
+            (
+                read_u32(entry, 8, false)? as u64,
+                read_u32(entry, 12, false)? as u64,
+            )
+        };
+        Some(FatArchEntry { offset, size })
+    }
+
+    /// Byte range of the slice, `None` on overflow
+    #[inline]
+    pub(crate) fn range(&self) -> Option<Range<u64>> {
+        Some(self.offset..self.offset.checked_add(self.size)?)
     }
 }
 

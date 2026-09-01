@@ -13,10 +13,8 @@ repository = "https://github.com/messense/fat-macho-rs.git"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-llvm-bitcode = { version = "0.4", optional = true }
-
-[dev-dependencies]
 goblin = "0.10.0"
+llvm-bitcode = { version = "0.4", optional = true }
 
 [features]
 default = ["bitcode"]
