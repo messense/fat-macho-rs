@@ -6,7 +6,7 @@ use std::{
     cmp::Ordering,
     fmt,
     fs::File,
-    io::{self, BufWriter, Write},
+    io::{self, BufWriter, IoSlice, Write},
     ops::Range,
     path::Path,
     sync::Arc,
@@ -173,13 +173,20 @@ impl Layout {
     }
 }
 
-/// Write `count` zero bytes
-fn write_zeros<W: Write>(writer: &mut W, mut count: u64) -> io::Result<()> {
-    static ZEROS: [u8; MAX_ALIGN as usize] = [0; MAX_ALIGN as usize];
-    while count > 0 {
-        let chunk = count.min(ZEROS.len() as u64) as usize;
-        writer.write_all(&ZEROS[..chunk])?;
-        count -= chunk as u64;
+/// Padding between slices; never longer than `MAX_ALIGN`
+static ZEROS: [u8; MAX_ALIGN as usize] = [0; MAX_ALIGN as usize];
+
+/// Write every buffer in `bufs`, with as few calls as the writer allows
+fn write_all_vectored<W: Write>(writer: &mut W, mut bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+    // drop leading empty buffers
+    IoSlice::advance_slices(&mut bufs, 0);
+    while !bufs.is_empty() {
+        match writer.write_vectored(bufs) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => IoSlice::advance_slices(&mut bufs, n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
     }
     Ok(())
 }
@@ -332,15 +339,11 @@ impl<'a> FatWriter<'a> {
         self.layout().total_size
     }
 
-    /// Write Mach-O fat binary into the writer
-    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
-        if self.arches.is_empty() {
-            return Ok(());
-        }
-        let layout = self.layout();
-        // Build the fat_header and the fat_arch entries in one buffer.
-        // Note that the fat binary header is big-endian, regardless of the
-        // endianness of the contained files.
+    /// The `fat_header` followed by the `fat_arch` table.
+    ///
+    /// The fat binary header is big-endian, regardless of the endianness of
+    /// the contained files.
+    fn header_bytes(&self, layout: &Layout) -> Vec<u8> {
         let mut hdr = Vec::with_capacity(layout.header_size());
         let magic = if layout.is_fat64 {
             FAT_MAGIC_64
@@ -365,26 +368,42 @@ impl<'a> FatWriter<'a> {
             }
         }
         debug_assert_eq!(hdr.len(), layout.header_size());
-        writer.write_all(&hdr)?;
-        // Write each arch, padded to its offset
+        hdr
+    }
+
+    /// Write Mach-O fat binary into the writer
+    ///
+    /// The header, the padding and every slice go out in a single vectored
+    /// write when the writer supports it.
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
+        if self.arches.is_empty() {
+            return Ok(());
+        }
+        let layout = self.layout();
+        let hdr = self.header_bytes(&layout);
+        // header, then padding + data per arch
+        let mut bufs = Vec::with_capacity(1 + 2 * self.arches.len());
+        bufs.push(IoSlice::new(&hdr));
         let mut offset = hdr.len() as u64;
         for (arch, &arch_offset) in self.arches.iter().zip(&layout.offsets) {
-            write_zeros(writer, arch_offset - offset)?;
-            writer.write_all(arch.data.as_slice())?;
+            let padding = (arch_offset - offset) as usize;
+            debug_assert!(padding < ZEROS.len());
+            bufs.push(IoSlice::new(&ZEROS[..padding]));
+            bufs.push(IoSlice::new(arch.data.as_slice()));
             offset = arch_offset + arch.len();
         }
+        write_all_vectored(writer, &mut bufs)?;
         Ok(())
     }
 
     /// Write Mach-O fat binary to a file
+    ///
+    /// The file is created or truncated, and made executable (mode `0755`)
+    /// like `lipo` does, whether or not it already existed.
     pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
         let file = File::create(path)?;
         #[cfg(unix)]
-        {
-            let mut perm = file.metadata()?.permissions();
-            perm.set_mode(0o755);
-            file.set_permissions(perm)?;
-        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
         // Large enough to coalesce the header, the padding and any small
         // slices into one write; big slices bypass the buffer anyway.
         let mut writer = BufWriter::with_capacity(4 * MAX_ALIGN as usize, file);
@@ -490,6 +509,21 @@ mod tests {
     use crate::error::Error;
     use crate::read::FatReader;
 
+    /// A writer that refuses vectored writes, to exercise the fallback path
+    struct Unvectored(Vec<u8>);
+
+    impl std::io::Write for Unvectored {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // partial writes on purpose
+            let n = buf.len().min(7);
+            self.0.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_fat_writer_add_exe() {
         let mut fat = FatWriter::new();
@@ -504,7 +538,31 @@ mod tests {
         let reader = FatReader::new(&out);
         assert!(reader.is_ok());
 
+        // same bytes through a writer without vectored I/O
+        let mut plain = Unvectored(Vec::new());
+        fat.write_to(&mut plain).unwrap();
+        assert_eq!(plain.0, out);
+
         fat.write_to_file("tests/output/fat").unwrap();
+        assert_eq!(fs::read("tests/output/fat").unwrap(), out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fat_writer_write_to_file_is_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut fat = FatWriter::new();
+        fat.add(fs::read("tests/fixtures/thin_x86_64").unwrap())
+            .unwrap();
+        // overwriting a file that isn't executable makes it executable
+        let path = "tests/output/fat_perms";
+        fs::write(path, b"stale").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        fat.write_to_file(path).unwrap();
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        assert_eq!(fs::read(path).unwrap().len() as u64, fat.total_size());
     }
 
     #[test]
