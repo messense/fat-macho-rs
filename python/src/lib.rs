@@ -27,8 +27,9 @@ impl FatWriter {
     /// Add a new thin Mach-O binary, static archive, LLVM bitcode file or
     /// all slices of an existing fat binary.
     ///
-    /// `bytes` objects are kept alive and referenced, not copied; other
-    /// buffer types are copied.
+    /// `bytes` objects are kept alive and referenced, not copied. Any other
+    /// sequence of bytes, such as a `bytearray`, is copied element by element
+    /// (the buffer protocol isn't available with the limited API below 3.11).
     fn add(&mut self, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let result = if let Ok(bytes) = data.cast::<PyBytes>() {
             let bytes = PyBackedBytes::from(bytes.clone());

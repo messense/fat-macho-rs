@@ -7,7 +7,7 @@ use std::{
     io::{self, BufWriter, IoSlice, Write},
     ops::Range,
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 #[cfg(feature = "bitcode")]
@@ -31,7 +31,8 @@ use goblin::mach::fat::FAT_MAGIC;
 use crate::error::Error;
 use crate::parse::{
     arch_name, archive_arch, classify, fat_arch_size, file_read_at, invalid, FatArchEntry,
-    FatHeader, Kind, MachHeader, Source, FAT_MAGIC_64, HEAD_LEN, SIZEOF_FAT_HEADER,
+    FatHeader, Kind, MachHeader, Source, FAT_MAGIC_64, HEAD_LEN, SIZEOF_FAT_ARCH_64,
+    SIZEOF_FAT_HEADER,
 };
 
 /// Largest slice alignment we ever use (the arm64 family's 2^14); the padding
@@ -40,6 +41,53 @@ const MAX_ALIGN: u64 = 0x4000;
 
 /// Buffer size for copying file-backed slices through user space
 const COPY_BUF_LEN: usize = 1 << 20;
+
+/// Vectored writes stack their buffer list for up to this many arches:
+/// the header, then padding and data per arch
+const INLINE_BUFS: usize = 1 + 2 * 8;
+
+/// A file added with [`FatWriter::add_file`]
+struct FileSource {
+    file: File,
+    /// Held while the file cursor is in use. Positional reads don't need it;
+    /// the kernel copy on Linux does, and `FatWriter::write_to` may run on
+    /// several threads at once.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    cursor: Mutex<()>,
+}
+
+impl FileSource {
+    fn new(file: File) -> Self {
+        FileSource {
+            file,
+            cursor: Mutex::new(()),
+        }
+    }
+
+    /// Copy `range` into the output file without going through user space.
+    ///
+    /// `io::copy` uses `copy_file_range(2)` (falling back to `sendfile(2)`)
+    /// for `File`-shaped readers only, and those read from the file cursor.
+    #[cfg(target_os = "linux")]
+    fn kernel_copy(&self, range: Range<u64>, writer: &mut BufWriter<File>) -> io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::sync::PoisonError;
+        let _cursor = self.cursor.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut reader = &self.file;
+        reader.seek(SeekFrom::Start(range.start))?;
+        let len = range.end - range.start;
+        let copied = io::copy(&mut reader.take(len), writer)?;
+        if copied != len {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(())
+    }
+}
+
+/// Attach the path to an I/O error, so that the message says which file
+fn with_path(err: io::Error, path: &Path) -> io::Error {
+    io::Error::new(err.kind(), format!("{}: {}", path.display(), err))
+}
 
 /// Bytes backing one slice of the fat binary.
 ///
@@ -51,7 +99,7 @@ enum ArchData<'a> {
     Borrowed(&'a [u8]),
     Owned(Arc<Vec<u8>>, Range<usize>),
     Shared(Arc<dyn AsRef<[u8]> + Send + Sync + 'a>, Range<usize>),
-    File(Arc<File>, Range<u64>),
+    File(Arc<FileSource>, Range<u64>),
 }
 
 impl<'a> ArchData<'a> {
@@ -126,7 +174,7 @@ impl Source for ArchData<'_> {
             ArchData::File(file, range) => {
                 let start = range.start + offset.min(range.end - range.start);
                 let n = buf.len().min((range.end - start) as usize);
-                file_read_at(file, &mut buf[..n], start)
+                file_read_at(&file.file, &mut buf[..n], start)
             }
             _ => self.bytes().unwrap().read_at(buf, offset),
         }
@@ -160,7 +208,6 @@ impl fmt::Debug for ArchData<'_> {
 #[derive(Debug)]
 struct ThinArch<'a> {
     data: ArchData<'a>,
-    size: u64,
     header: MachHeader,
     align: u64,
 }
@@ -226,30 +273,78 @@ fn write_all_vectored<W: Write>(writer: &mut W, mut bufs: &mut [IoSlice<'_>]) ->
 }
 
 /// How file-backed slices get to the output
-type FileCopy<'w, W> = &'w mut dyn FnMut(&File, Range<u64>, &mut W) -> io::Result<()>;
+type FileCopy<'w, W> = &'w mut dyn FnMut(&FileSource, Range<u64>, &mut W) -> io::Result<()>;
 
-/// Copy a file range through a user space buffer, works with any writer
-fn copy_file_buffered<W: Write>(
-    buf: &mut Vec<u8>,
-    file: &File,
-    range: Range<u64>,
-    writer: &mut W,
-) -> io::Result<()> {
-    if buf.is_empty() {
-        buf.resize(COPY_BUF_LEN.min((range.end - range.start) as usize), 0);
+/// Buffers in flight for one vectored write
+struct Pending<'b, 'a> {
+    bufs: &'b mut [IoSlice<'a>],
+    len: usize,
+}
+
+impl<'b, 'a> Pending<'b, 'a> {
+    fn push(&mut self, buf: &'a [u8]) {
+        self.bufs[self.len] = IoSlice::new(buf);
+        self.len += 1;
     }
-    let mut offset = range.start;
-    while offset < range.end {
-        let n = buf.len().min((range.end - offset) as usize);
-        match file_read_at(file, &mut buf[..n], offset)? {
-            0 => return Err(io::ErrorKind::UnexpectedEof.into()),
-            n => {
-                writer.write_all(&buf[..n])?;
-                offset += n as u64;
+
+    fn flush<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        write_all_vectored(writer, &mut self.bufs[..self.len])?;
+        self.len = 0;
+        Ok(())
+    }
+}
+
+/// Copies file-backed slices to the output
+#[derive(Default)]
+struct FileCopier {
+    /// User space bounce buffer, allocated on first use
+    buf: Vec<u8>,
+}
+
+impl FileCopier {
+    /// Copy a file range through the buffer, works with any writer
+    fn copy<W: Write>(
+        &mut self,
+        file: &FileSource,
+        range: Range<u64>,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let want = COPY_BUF_LEN.min((range.end - range.start) as usize);
+        if self.buf.len() < want {
+            self.buf.resize(want, 0);
+        }
+        let mut offset = range.start;
+        while offset < range.end {
+            let n = self.buf.len().min((range.end - offset) as usize);
+            match file_read_at(&file.file, &mut self.buf[..n], offset) {
+                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => {
+                    writer.write_all(&self.buf[..n])?;
+                    offset += n as u64;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
             }
         }
+        Ok(())
     }
-    Ok(())
+
+    /// Copy a file range into the output file, in the kernel where possible
+    fn copy_to_file(
+        &mut self,
+        file: &FileSource,
+        range: Range<u64>,
+        writer: &mut BufWriter<File>,
+    ) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            file.kernel_copy(range, writer)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.copy(file, range, writer)
+        }
+    }
 }
 
 /// Mach-O fat binary writer
@@ -295,9 +390,11 @@ impl<'a> FatWriter<'a> {
     /// file when the fat binary is written, so the file must not change in
     /// the meantime.
     pub fn add_file<P: AsRef<Path>>(&mut self, path: P) -> Result<(), Error> {
-        let file = File::open(path)?;
-        let len = file.metadata()?.len();
-        self.add_data(ArchData::File(Arc::new(file), 0..len), true)
+        let path = path.as_ref();
+        let file = File::open(path).map_err(|e| with_path(e, path))?;
+        let len = file.metadata().map_err(|e| with_path(e, path))?.len();
+        let file = Arc::new(FileSource::new(file));
+        self.add_data(ArchData::File(file, 0..len), true)
     }
 
     fn add_data(&mut self, data: ArchData<'a>, allow_fat: bool) -> Result<(), Error> {
@@ -312,8 +409,8 @@ impl<'a> FatWriter<'a> {
         let kind = classify(head)?.ok_or_else(|| invalid("input is not a macho file"))?;
         let (header, align) = match kind {
             Kind::Thin(header) => (header, get_align_from_cpu_types(header)),
-            Kind::Fat if allow_fat => return self.add_fat(data),
-            Kind::Fat => return Err(invalid("fat binary nested inside a fat binary")),
+            Kind::Fat { .. } if allow_fat => return self.add_fat(data),
+            Kind::Fat { .. } => return Err(invalid("fat binary nested inside a fat binary")),
             Kind::Archive => {
                 let header = archive_arch(&data)?;
                 let align = if header.cpu_type & CPU_ARCH_ABI64 != 0 {
@@ -342,7 +439,7 @@ impl<'a> FatWriter<'a> {
         if len - (SIZEOF_FAT_HEADER as u64) < fat.arch_table_len() {
             return Err(invalid("fat arch table runs past the end of the input"));
         }
-        let mut entry_buf = [0u8; 32];
+        let mut entry_buf = [0u8; SIZEOF_FAT_ARCH_64];
         for i in 0..fat.narches as usize {
             let start = SIZEOF_FAT_HEADER + i * fat.arch_size();
             let entry = match data.bytes() {
@@ -373,7 +470,6 @@ impl<'a> FatWriter<'a> {
             return Err(Error::DuplicatedArch(header.arch_name().to_string()));
         }
         self.arches.push(ThinArch {
-            size: data.len(),
             data,
             header,
             align,
@@ -433,7 +529,7 @@ impl<'a> FatWriter<'a> {
     }
 
     fn layout(&self) -> Layout {
-        let sizes: Vec<u64> = self.arches.iter().map(|arch| arch.size).collect();
+        let sizes: Vec<u64> = self.arches.iter().map(|arch| arch.data.len()).collect();
         let align = self.arches.iter().map(|arch| arch.align).max().unwrap_or(1);
         Layout::compute(&sizes, align)
     }
@@ -464,15 +560,16 @@ impl<'a> FatWriter<'a> {
         for (arch, &arch_offset) in self.arches.iter().zip(&layout.offsets) {
             hdr.extend_from_slice(&arch.header.cpu_type.to_be_bytes());
             hdr.extend_from_slice(&arch.header.cpu_subtype.to_be_bytes());
+            let size = arch.data.len();
             if layout.is_fat64 {
                 hdr.extend_from_slice(&arch_offset.to_be_bytes());
-                hdr.extend_from_slice(&arch.size.to_be_bytes());
+                hdr.extend_from_slice(&size.to_be_bytes());
                 hdr.extend_from_slice(&layout.align_bits.to_be_bytes());
                 // Reserved
                 hdr.extend_from_slice(&0u32.to_be_bytes());
             } else {
                 hdr.extend_from_slice(&(arch_offset as u32).to_be_bytes());
-                hdr.extend_from_slice(&(arch.size as u32).to_be_bytes());
+                hdr.extend_from_slice(&(size as u32).to_be_bytes());
                 hdr.extend_from_slice(&layout.align_bits.to_be_bytes());
             }
         }
@@ -485,9 +582,9 @@ impl<'a> FatWriter<'a> {
     /// Everything that is in memory goes out in a single vectored write when
     /// the writer supports it.
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
-        let mut buf = Vec::new();
+        let mut copier = FileCopier::default();
         self.write_inner(writer, &mut |file, range, writer| {
-            copy_file_buffered(&mut buf, file, range, writer)
+            copier.copy(file, range, writer)
         })
     }
 
@@ -497,10 +594,8 @@ impl<'a> FatWriter<'a> {
         }
         let layout = self.layout();
         let hdr = self.header_bytes(&layout);
-        // header, then padding + data per arch; kept on the stack for the
-        // usual handful of arches
         let count = 1 + 2 * self.arches.len();
-        let mut inline = [IoSlice::new(&[]); 1 + 2 * 8];
+        let mut inline = [IoSlice::new(&[]); INLINE_BUFS];
         let mut heap = Vec::new();
         let bufs: &mut [IoSlice<'_>] = if count <= inline.len() {
             &mut inline[..count]
@@ -508,86 +603,48 @@ impl<'a> FatWriter<'a> {
             heap.resize(count, IoSlice::new(&[]));
             &mut heap
         };
-        let mut len = 0;
-        macro_rules! push {
-            ($buf:expr) => {{
-                bufs[len] = IoSlice::new($buf);
-                len += 1;
-            }};
-        }
-        push!(&hdr);
+        let mut pending = Pending { bufs, len: 0 };
+        pending.push(&hdr);
         let mut offset = hdr.len() as u64;
         for (arch, &arch_offset) in self.arches.iter().zip(&layout.offsets) {
             let padding = (arch_offset - offset) as usize;
             debug_assert!(padding < ZEROS.len());
-            push!(&ZEROS[..padding]);
-            match (&arch.data, arch.data.bytes()) {
-                (_, Some(bytes)) => push!(bytes),
-                (ArchData::File(file, range), None) => {
-                    write_all_vectored(writer, &mut bufs[..len])?;
-                    len = 0;
+            pending.push(&ZEROS[..padding]);
+            match &arch.data {
+                ArchData::File(file, range) => {
+                    pending.flush(writer)?;
                     copy(file, range.clone(), writer)?;
                 }
-                (_, None) => unreachable!(),
+                data => pending.push(data.bytes().expect("in-memory slice")),
             }
-            offset = arch_offset + arch.size;
+            offset = arch_offset + arch.data.len();
         }
-        write_all_vectored(writer, &mut bufs[..len])?;
+        pending.flush(writer)?;
         Ok(())
     }
 
     /// Write Mach-O fat binary to a file
     ///
-    /// The file is created with mode `0755` (subject to the umask).
+    /// The file is created or truncated, and made executable (mode `0755`)
+    /// like `lipo` does, whether or not it already existed.
     pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
-        let mut options = File::options();
-        options.write(true).create(true).truncate(true);
+        let path = path.as_ref();
+        let file = File::create(path).map_err(|e| with_path(e, path))?;
         #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o755);
-        let file = options.open(path)?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| with_path(e, path))?;
+        }
         // Large enough to coalesce the header, the padding and any small
         // slices into one write; big slices bypass the buffer anyway.
         let mut writer = BufWriter::with_capacity(4 * MAX_ALIGN as usize, file);
-        let mut buf = Vec::new();
+        let mut copier = FileCopier::default();
         self.write_inner(&mut writer, &mut |file, range, writer| {
-            copy_file_to_file(&mut buf, file, range, writer)
+            copier.copy_to_file(file, range, writer)
         })?;
         writer.flush()?;
         Ok(())
-    }
-}
-
-/// Copy a file range into the output file.
-///
-/// On Linux this goes through `copy_file_range(2)` (falling back to
-/// `sendfile(2)`), so the bytes never enter user space; elsewhere they are
-/// copied through a buffer.
-fn copy_file_to_file(
-    buf: &mut Vec<u8>,
-    file: &File,
-    range: Range<u64>,
-    writer: &mut BufWriter<File>,
-) -> io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::{Read, Seek, SeekFrom};
-        let _ = buf;
-        // `io::copy` only uses the kernel copy for `File`-shaped readers, and
-        // those read from the file cursor, so position it first. The writer
-        // owns the `File` exclusively (see `add_file`), nobody else observes
-        // the cursor.
-        let mut reader = file;
-        reader.seek(SeekFrom::Start(range.start))?;
-        let len = range.end - range.start;
-        let copied = io::copy(&mut reader.take(len), writer)?;
-        if copied != len {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        copy_file_buffered(buf, file, range, writer)
     }
 }
 
@@ -680,6 +737,7 @@ mod tests {
 
     use super::{FatWriter, Layout};
     use crate::error::Error;
+    use crate::parse::Source;
     use crate::read::FatReader;
 
     /// A writer that refuses vectored writes, to exercise the fallback path
@@ -718,6 +776,24 @@ mod tests {
 
         fat.write_to_file("tests/output/fat").unwrap();
         assert_eq!(fs::read("tests/output/fat").unwrap(), out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fat_writer_write_to_file_is_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut fat = FatWriter::new();
+        fat.add(fs::read("tests/fixtures/thin_x86_64").unwrap())
+            .unwrap();
+        // overwriting a file that isn't executable makes it executable
+        let path = "tests/output/fat_perms";
+        fs::write(path, b"stale").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        fat.write_to_file(path).unwrap();
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        assert_eq!(fs::read(path).unwrap().len() as u64, fat.total_size());
     }
 
     #[test]
@@ -853,10 +929,10 @@ mod tests {
         }
 
         let mut fat = FatWriter::new();
-        assert!(matches!(
-            fat.add_file("tests/fixtures/nope"),
-            Err(Error::Io(_))
-        ));
+        match fat.add_file("tests/fixtures/nope") {
+            Err(Error::Io(err)) => assert!(err.to_string().contains("tests/fixtures/nope")),
+            other => panic!("expected Io error, got {:?}", other),
+        }
         assert!(matches!(
             fat.add_file("Cargo.toml"),
             Err(Error::InvalidMachO(_))
@@ -932,7 +1008,7 @@ mod tests {
             fat64.extend_from_slice(&arch.header.cpu_type.to_be_bytes());
             fat64.extend_from_slice(&arch.header.cpu_subtype.to_be_bytes());
             fat64.extend_from_slice(&offset.to_be_bytes());
-            fat64.extend_from_slice(&arch.size.to_be_bytes());
+            fat64.extend_from_slice(&arch.data.len().to_be_bytes());
             fat64.extend_from_slice(&layout.align_bits.to_be_bytes());
             fat64.extend_from_slice(&0u32.to_be_bytes());
         }

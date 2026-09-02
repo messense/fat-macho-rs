@@ -24,12 +24,21 @@ pub(crate) const FAT_MAGIC_64: u32 = FAT_MAGIC + 1;
 /// Magic of the LLVM bitcode wrapper header, as a little-endian `u32`
 pub(crate) const LLVM_BITCODE_WRAPPER_MAGIC: u32 = 0x0B17_C0DE;
 
-pub(crate) const SIZEOF_MACH_HEADER_32: usize = goblin::mach::header::SIZEOF_HEADER_32;
-pub(crate) const SIZEOF_MACH_HEADER_64: usize = goblin::mach::header::SIZEOF_HEADER_64;
+const SIZEOF_MACH_HEADER_32: usize = goblin::mach::header::SIZEOF_HEADER_32;
+const SIZEOF_MACH_HEADER_64: usize = goblin::mach::header::SIZEOF_HEADER_64;
 pub(crate) const SIZEOF_FAT_HEADER: usize = goblin::mach::fat::SIZEOF_FAT_HEADER;
-pub(crate) const SIZEOF_FAT_ARCH: usize = goblin::mach::fat::SIZEOF_FAT_ARCH;
+const SIZEOF_FAT_ARCH: usize = goblin::mach::fat::SIZEOF_FAT_ARCH;
 pub(crate) const SIZEOF_FAT_ARCH_64: usize = 32;
-const SIZEOF_AR_HEADER: u64 = 60;
+
+/// `struct ar_hdr`: the fields we look at, by byte range
+const SIZEOF_AR_HEADER: usize = 60;
+const AR_NAME: Range<usize> = 0..16;
+const AR_SIZE: Range<usize> = 48..58;
+const AR_FMAG: Range<usize> = 58..60;
+/// Value of `ar_fmag`, ends every member header
+const AR_FMAG_VALUE: &[u8; 2] = b"`\n";
+/// BSD long member name, `#1/N`: the name's N bytes precede the data
+const AR_BSD_LONG_NAME: &[u8] = b"#1/";
 
 /// Bytes needed to classify any input: the largest header we look at
 pub(crate) const HEAD_LEN: usize = SIZEOF_MACH_HEADER_64;
@@ -93,6 +102,8 @@ pub(crate) fn file_read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Resu
     {
         std::os::windows::fs::FileExt::seek_read(file, buf, offset)
     }
+    #[cfg(not(any(unix, windows)))]
+    compile_error!("file input needs positional reads, which this target does not provide");
 }
 
 /// Strip the capability bits (`CPU_SUBTYPE_MASK`, the high byte) from a `cpusubtype`.
@@ -173,7 +184,7 @@ impl FatHeader {
         fat_arch_size(self.is_fat64)
     }
 
-    /// Byte range of the `fat_arch` table
+    /// Size in bytes of the `fat_arch` table
     pub(crate) fn arch_table_len(&self) -> u64 {
         self.narches as u64 * self.arch_size() as u64
     }
@@ -223,8 +234,8 @@ pub(crate) fn fat_arch_size(is_fat64: bool) -> usize {
 pub(crate) enum Kind {
     /// Thin Mach-O binary
     Thin(MachHeader),
-    /// Mach-O fat binary
-    Fat,
+    /// Mach-O fat binary, with a `fat_arch` or a `fat_arch_64` table
+    Fat { is_fat64: bool },
     /// `ar` static archive
     Archive,
     /// LLVM bitcode with a wrapper header
@@ -270,7 +281,8 @@ pub(crate) fn classify(head: &[u8]) -> Result<Option<Kind>, Error> {
         MH_CIGAM => (true, SIZEOF_MACH_HEADER_32),
         MH_MAGIC_64 => (false, SIZEOF_MACH_HEADER_64),
         MH_CIGAM_64 => (true, SIZEOF_MACH_HEADER_64),
-        FAT_MAGIC | FAT_MAGIC_64 => return Ok(Some(Kind::Fat)),
+        FAT_MAGIC => return Ok(Some(Kind::Fat { is_fat64: false })),
+        FAT_MAGIC_64 => return Ok(Some(Kind::Fat { is_fat64: true })),
         BITCODE_MAGIC_BE => return Ok(Some(Kind::Bitcode)),
         _ if head.starts_with(AR_MAGIC) => return Ok(Some(Kind::Archive)),
         _ => return Ok(None),
@@ -306,24 +318,23 @@ fn ar_field(field: &[u8]) -> Option<u64> {
 pub(crate) fn archive_arch<S: Source + ?Sized>(src: &S) -> Result<MachHeader, Error> {
     let len = src.len();
     let mut offset = AR_MAGIC.len() as u64;
-    let mut hdr = [0u8; SIZEOF_AR_HEADER as usize];
+    let mut hdr = [0u8; SIZEOF_AR_HEADER];
     let mut head = [0u8; HEAD_LEN];
     let malformed = || invalid("malformed archive");
     while offset < len {
-        if len - offset < SIZEOF_AR_HEADER {
+        if len - offset < SIZEOF_AR_HEADER as u64 {
             return Err(malformed());
         }
         src.read_exact_at(&mut hdr, offset)?;
-        if &hdr[58..60] != b"`\n" {
+        if &hdr[AR_FMAG] != AR_FMAG_VALUE {
             return Err(malformed());
         }
-        let size = ar_field(&hdr[48..58]).ok_or_else(malformed)?;
-        let mut data = offset + SIZEOF_AR_HEADER;
+        let size = ar_field(&hdr[AR_SIZE]).ok_or_else(malformed)?;
+        let mut data = offset + SIZEOF_AR_HEADER as u64;
         let mut data_len = size;
-        // BSD long name: `#1/N`, the N-byte name precedes the data and is
-        // counted in the size
-        if let Some(name_len) = hdr.strip_prefix(b"#1/") {
-            let name_len = ar_field(&name_len[..13]).ok_or_else(malformed)?;
+        // the long name is counted in the member size
+        if let Some(name_len) = hdr[AR_NAME].strip_prefix(AR_BSD_LONG_NAME) {
+            let name_len = ar_field(name_len).ok_or_else(malformed)?;
             if name_len > size {
                 return Err(malformed());
             }
