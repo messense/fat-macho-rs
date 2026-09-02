@@ -30,8 +30,7 @@ pub(crate) struct MachHeader {
 impl MachHeader {
     /// Compare architectures ignoring the capability bits of `cpusubtype`
     pub(crate) fn same_arch(&self, cpu_type: CpuType, cpu_subtype: CpuSubType) -> bool {
-        self.cpu_type == cpu_type
-            && strip_cpu_subtype_caps(self.cpu_subtype) == strip_cpu_subtype_caps(cpu_subtype)
+        same_arch(self.cpu_type, self.cpu_subtype, cpu_type, cpu_subtype)
     }
 
     /// Human readable architecture name, e.g. `arm64e`
@@ -49,6 +48,19 @@ impl MachHeader {
 /// Like `lipo`, we ignore those bits when identifying an architecture.
 pub(crate) fn strip_cpu_subtype_caps(cpu_subtype: CpuSubType) -> CpuSubType {
     cpu_subtype & !CPU_SUBTYPE_MASK
+}
+
+/// Whether `(cpu_type, cpu_subtype)` names the same architecture as
+/// `(other_type, other_subtype)`, ignoring capability bits
+#[inline]
+pub(crate) fn same_arch(
+    cpu_type: CpuType,
+    cpu_subtype: CpuSubType,
+    other_type: CpuType,
+    other_subtype: CpuSubType,
+) -> bool {
+    cpu_type == other_type
+        && strip_cpu_subtype_caps(cpu_subtype) == strip_cpu_subtype_caps(other_subtype)
 }
 
 /// What kind of file a buffer holds, judged by its magic

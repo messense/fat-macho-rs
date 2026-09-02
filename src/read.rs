@@ -1,7 +1,7 @@
 use goblin::mach::{cputype::get_arch_from_flag, MultiArch};
 
 use crate::error::Error;
-use crate::parse::{classify, Kind};
+use crate::parse::{classify, same_arch, Kind};
 
 /// Mach-O fat binary reader
 #[derive(Debug)]
@@ -27,13 +27,16 @@ impl<'a> FatReader<'a> {
     }
 
     /// Extract thin binary by arch name
+    ///
+    /// Like `lipo -thin`, the subtype must match too, ignoring capability
+    /// bits: `arm64` does not extract an `arm64e` slice.
     pub fn extract(&self, arch_name: &str) -> Option<&'a [u8]> {
-        let (cpu_type, _cpu_subtype) = get_arch_from_flag(arch_name)?;
+        let (cpu_type, cpu_subtype) = get_arch_from_flag(arch_name)?;
         let arch = self
             .fat
             .iter_arches()
             .map_while(Result::ok)
-            .find(|arch| arch.cputype == cpu_type)?;
+            .find(|arch| same_arch(arch.cputype, arch.cpusubtype, cpu_type, cpu_subtype))?;
         let start = arch.offset as usize;
         let end = start.checked_add(arch.size as usize)?;
         self.buffer.get(start..end)
@@ -99,6 +102,19 @@ mod test {
         let reader = FatReader::new(&buf);
         assert!(reader.is_err());
         assert!(matches!(reader.unwrap_err(), Error::NotFatBinary));
+
+        let buf = fs::read("tests/fixtures/thin_arm64.a").unwrap();
+        assert!(matches!(FatReader::new(&buf), Err(Error::NotFatBinary)));
+    }
+
+    #[test]
+    fn test_fat_reader_extract_subtype() {
+        let buf = fs::read("tests/fixtures/simplefat").unwrap();
+        let reader = FatReader::new(&buf).unwrap();
+        assert!(reader.extract("arm64").is_some());
+        // arm64e is a different architecture, like `lipo -thin arm64e`
+        assert!(reader.extract("arm64e").is_none());
+        assert!(reader.extract("i386").is_none());
     }
 
     #[test]
