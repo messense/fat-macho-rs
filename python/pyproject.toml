@@ -5,3 +5,12 @@ build-backend = "maturin"
 [project]
 name = "fat-macho"
 dynamic = ["version", "readme", "urls"]
+
+[tool.maturin]
+# abi3 wheels for 3.8+ and, from 3.15, abi3t wheels (PEP 803) that load on
+# both GIL-enabled and free-threaded interpreters. Free-threaded 3.13/3.14
+# have no stable ABI and get version-specific wheels.
+features = [
+  { feature = "pyo3/abi3-py38", python-version = "<3.15" },
+  { feature = "pyo3/abi3t-py315", python-version = ">=3.15" },
+]
