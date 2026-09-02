@@ -5,6 +5,7 @@ authors = ["messense <messense@icloud.com>"]
 description = "Mach-O Fat Binary Reader and Writer"
 keywords = ["fat", "mach", "macho", "universal", "universal2"]
 edition = "2021"
+rust-version = "1.81"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/messense/fat-macho-rs.git"
