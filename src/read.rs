@@ -1,7 +1,7 @@
 use goblin::mach::{cputype::get_arch_from_flag, MultiArch};
 
 use crate::error::Error;
-use crate::parse::{classify, same_arch, Kind};
+use crate::parse::{classify, invalid, same_arch, Kind, HEAD_LEN};
 
 /// Mach-O fat binary reader
 #[derive(Debug)]
@@ -14,13 +14,18 @@ impl<'a> FatReader<'a> {
     /// Parse a Mach-O FAT binary from a buffer
     ///
     /// Only the fat header is inspected; the individual slices are not parsed.
+    /// Fat binaries with a 64-bit `fat_arch_64` table are rejected, goblin's
+    /// [`MultiArch`] would misread them.
     pub fn new(buffer: &'a [u8]) -> Result<Self, Error> {
         let magic = goblin::mach::peek(buffer, 0)?;
-        match classify(buffer)? {
-            Some(Kind::Fat) => Ok(Self {
+        match classify(&buffer[..buffer.len().min(HEAD_LEN)])? {
+            Some(Kind::Fat { is_fat64: false }) => Ok(Self {
                 buffer,
                 fat: MultiArch::new(buffer)?,
             }),
+            Some(Kind::Fat { is_fat64: true }) => {
+                Err(invalid("64-bit fat binaries are not supported"))
+            }
             Some(_) => Err(Error::NotFatBinary),
             None => Err(goblin::error::Error::BadMagic(u64::from(magic)).into()),
         }
@@ -108,13 +113,12 @@ mod test {
     }
 
     #[test]
-    fn test_fat_reader_extract_subtype() {
-        let buf = fs::read("tests/fixtures/simplefat").unwrap();
-        let reader = FatReader::new(&buf).unwrap();
-        assert!(reader.extract("arm64").is_some());
-        // arm64e is a different architecture, like `lipo -thin arm64e`
-        assert!(reader.extract("arm64e").is_none());
-        assert!(reader.extract("i386").is_none());
+    fn test_fat_reader_fat64_rejected() {
+        // used to be handed to goblin, which read the 32-byte entries as
+        // 20-byte ones and returned garbage slices
+        let mut buf = fs::read("tests/fixtures/simplefat").unwrap();
+        buf[..4].copy_from_slice(&crate::parse::FAT_MAGIC_64.to_be_bytes());
+        assert!(matches!(FatReader::new(&buf), Err(Error::InvalidMachO(_))));
     }
 
     #[test]
@@ -128,6 +132,16 @@ mod test {
         assert!(reader.extract("x86_64").is_none());
         assert!(reader.extract("arm64").is_none());
         assert!(reader.extract("not-an-arch").is_none());
+    }
+
+    #[test]
+    fn test_fat_reader_extract_subtype() {
+        let buf = fs::read("tests/fixtures/simplefat").unwrap();
+        let reader = FatReader::new(&buf).unwrap();
+        assert!(reader.extract("arm64").is_some());
+        // arm64e is a different architecture, like `lipo -thin arm64e`
+        assert!(reader.extract("arm64e").is_none());
+        assert!(reader.extract("i386").is_none());
     }
 
     #[test]
