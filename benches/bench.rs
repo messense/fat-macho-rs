@@ -4,6 +4,7 @@
 //! variables `BENCH_THIN`, `BENCH_FAT` and `BENCH_AR` at large real world
 //! binaries for more meaningful numbers.
 use std::hint::black_box;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fat_macho::{FatReader, FatWriter};
@@ -64,14 +65,18 @@ fn main() {
     let (thin_path, thin) = input("BENCH_THIN", "tests/fixtures/thin_arm64");
     let (fat_path, fat) = input("BENCH_FAT", "tests/fixtures/hellofat");
     let (ar_path, ar) = input("BENCH_AR", "tests/fixtures/thin_arm64.a");
-    let (_, other) = input("BENCH_OTHER", "tests/fixtures/thin_x86_64");
+    let (other_path, other) = input("BENCH_OTHER", "tests/fixtures/thin_x86_64");
     println!("thin: {} ({} bytes)", thin_path, thin.len());
     println!("fat:  {} ({} bytes)", fat_path, fat.len());
     println!("ar:   {} ({} bytes)", ar_path, ar.len());
     println!("note: the `owned Vec` rows include cloning the input inside the timed loop");
     println!();
 
-    for (name, data) in [("thin", &thin), ("fat", &fat), ("archive", &ar)] {
+    for (name, path, data) in [
+        ("thin", &thin_path, &thin),
+        ("fat", &fat_path, &fat),
+        ("archive", &ar_path, &ar),
+    ] {
         bench(&format!("add {} (owned Vec)", name), budget, || {
             let mut w = FatWriter::new();
             w.add(black_box(data.clone())).unwrap();
@@ -82,7 +87,22 @@ fn main() {
             w.add(black_box(data.as_slice())).unwrap();
             black_box(w);
         });
+        bench(
+            &format!("add_file {} (open + header)", name),
+            budget,
+            || {
+                let mut w = FatWriter::new();
+                w.add_file(black_box(path)).unwrap();
+                black_box(w);
+            },
+        );
     }
+    let shared = Arc::new(thin.clone());
+    bench("add_shared thin (Arc<Vec<u8>>)", budget, || {
+        let mut w = FatWriter::new();
+        w.add_shared(black_box(shared.clone())).unwrap();
+        black_box(w);
+    });
 
     let mut w = FatWriter::new();
     w.add(thin.as_slice()).unwrap();
@@ -98,6 +118,26 @@ fn main() {
     });
     let tmp = std::env::temp_dir().join("fat-macho-bench-out");
     bench("write_to_file (thin + other)", budget, || {
+        w.write_to_file(&tmp).unwrap();
+    });
+
+    let mut wf = FatWriter::new();
+    wf.add_file(&thin_path).unwrap();
+    wf.add_file(&other_path).unwrap();
+    bench("write_to Vec (from files, pre-sized)", budget, || {
+        let mut out = Vec::with_capacity(wf.total_size() as usize);
+        wf.write_to(&mut out).unwrap();
+        black_box(out);
+    });
+    bench("write_to_file (from files)", budget, || {
+        wf.write_to_file(&tmp).unwrap();
+    });
+    bench("fs::read x2 + write_to_file (baseline)", budget, || {
+        let a = std::fs::read(&thin_path).unwrap();
+        let b = std::fs::read(&other_path).unwrap();
+        let mut w = FatWriter::new();
+        w.add(&a).unwrap();
+        w.add(&b).unwrap();
         w.write_to_file(&tmp).unwrap();
     });
     let _ = std::fs::remove_file(&tmp);
